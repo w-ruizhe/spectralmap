@@ -8,13 +8,13 @@ from importlib.metadata import version as pkg_version
 # Add project root + src/ to import path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src")))
 
-project = "SpectralMap"
+project = "spectralmap"
 author = "Your Name"
 copyright = f"{date.today().year}, {author}"
 
 # Project versioning
 try:
-    release = pkg_version("SpectralMap")            # full version, e.g. "0.1.0"
+    release = pkg_version("spectralmap")            # full version, e.g. "0.1.0"
 except Exception:
     release = "0.1.0"
 
@@ -30,6 +30,7 @@ extensions = [
     "sphinx_copybutton",
     "sphinx_autodoc_typehints",
     "myst_parser",
+    "nbsphinx",
 ]
 
 templates_path = ["_templates"]

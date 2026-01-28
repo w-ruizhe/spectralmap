@@ -1,4 +1,4 @@
-# SpectralMap (template)
+# spectralmap (template)
 
 A starter repository for **rotational + eclipse/occultation surface mapping**, with optional
 **wavelength-resolved (“spectral”) mapping**, plus a **Sphinx + Read the Docs** documentation site.
@@ -7,7 +7,7 @@ A starter repository for **rotational + eclipse/occultation surface mapping**, w
 
 ```bash
 git clone <YOUR_REPO_URL>
-cd SpectralMap
+cd spectralmap
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev,docs]"

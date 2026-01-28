@@ -1,11 +1,11 @@
-SpectralMap
+spectralmap
 ===========
 
-**SpectralMap** is a template documentation site for projects doing:
+A package for **rotational + eclipse/occultation surface mapping**, with optional
+**wavelength-resolved (“spectral”)** inference.
 
-- **rotational mapping** (phase curves / rotational modulation)
-- **eclipse / occultation mapping** (ingress/egress constraints)
-- optionally **wavelength-resolved (“spectral”)** map inference
+This documentation is intentionally structured in a **starry-like** way (clear user guide +
+examples + API reference). Most pages are placeholders for now — fill in details as you build.
 
 .. toctree::
    :maxdepth: 2
@@ -13,7 +13,12 @@ SpectralMap
 
    installation
    quickstart
-   rtd_setup
+
+.. toctree::
+   :maxdepth: 2
+   :caption: User guide
+
+   user_guide/index
 
 .. toctree::
    :maxdepth: 2
@@ -28,11 +33,17 @@ SpectralMap
    api
    faq
    references
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Development
+
    contributing
    changelog
+   rtd_setup
 
-Indices and tables
-------------------
+Indices
+-------
 
 * :ref:`genindex`
 * :ref:`modindex`
