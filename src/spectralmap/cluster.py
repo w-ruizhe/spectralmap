@@ -97,8 +97,8 @@ def find_clusters(F_all_wl, F_cov_all_wl, n_neighbors=50):
     pca = PCA(n_components=2)
     W = pca.fit_transform(log_X)
 
-    corner_indices = get_best_polygon_by_points(W, min_corners=3, sensitivity=3)
-    corner_coords = X[corner_indices]
+    corner_indices = get_best_polygon_by_points(W, min_corners=3, sensitivity=5)
+    corner_coords = W[corner_indices]
     # Sort by Angle
     centroid = np.mean(corner_coords, axis=0)
     angles = np.arctan2(corner_coords[:, 1] - centroid[1], corner_coords[:, 0] - centroid[0])
@@ -163,5 +163,44 @@ def find_clusters(F_all_wl, F_cov_all_wl, n_neighbors=50):
 
     F_regional_covs = np.einsum('ij,wjk,kl->wil', V, F_cov_all_wl, V.T)
     F_regional_errs = np.sqrt(np.diagonal(F_regional_covs, axis1=1, axis2=2)).T # (n_clusters, n_wavelengths)
+
+
+    # --- 4. PLOTTING ---
+    plt.figure(figsize=(7, 2.5), dpi=300)
+
+    base_colors = ['#D62728', '#1F77B4', '#9467BD', '#2CA02C', '#FF7F0E', '#8C564B']
+    plot_colors = base_colors
+
+    # 1. Plot UNASSIGNED points (Grey, faint)
+    mask_unassigned = labels == -1
+    plt.scatter(W[mask_unassigned, 0], W[mask_unassigned, 1],
+                s=5, alpha=0.15, color='#BBBBBB', edgecolor='none', zorder=1)
+
+    # 2. Plot ASSIGNED clusters
+    for k in range(K):
+        mask = labels == k
+        color = plot_colors[k % len(plot_colors)]
+        plt.scatter(W[mask, 0], W[mask, 1],
+                    s=15, alpha=0.8, color=color, edgecolor='none', zorder=2,
+                    label=f'Cluster {k+1}')
+
+    # 3. Plot Polygon
+    poly_draw = np.vstack([corner_coords, corner_coords[0]])
+    plt.plot(poly_draw[:, 0], poly_draw[:, 1], 'k-', lw=1.5, alpha=0.7, zorder=3)
+
+    # 4. Labels
+    for k in range(K):
+        color = plot_colors[k % len(plot_colors)]
+        plt.text(centers[k, 0], centers[k, 1], f'{k+1}',
+                fontsize=10, fontname='Comic Sans MS', fontweight='bold', color='white',
+                ha='center', va='center',
+                bbox=dict(boxstyle='circle,pad=0.3', facecolor=color, edgecolor='white', linewidth=1, alpha=0.9),
+                path_effects=[pe.Stroke(linewidth=1.5, foreground='gray'), pe.Normal()], zorder=10)
+
+    plt.title(f'Classification in PC Space (k={N_NEIGHBORS})', fontsize=9)
+    plt.xlabel('PC 1')
+    plt.ylabel('PC 2')
+    plt.gca().set_aspect('equal')
+    plt.tight_layout()
 
     return F_regionals, F_regional_errs, labels

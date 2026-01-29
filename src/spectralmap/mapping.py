@@ -11,7 +11,7 @@ import numpy as np
 import starry
 # starry.config.lazy = False  # disable lazy evaluation
 # starry.config.quiet = True  # disable warnings
-from spectralmap.bayesian_linalg import optimize_alpha_fixed_beta, optimize_alpha_beta
+from spectralmap.bayesian_linalg import optimize_hyperparameters
 
 @dataclass
 class LightCurveData:
@@ -33,6 +33,12 @@ class Map:
         self.lats, self.lons = lats, lons
         self.map_res = map_res
         self.ydeg = ydeg
+        self.mean = None
+        self.cov = None
+        self.flux = None
+        self.flux_err = None
+        self.theta = None
+
         
     def design_matrix(self, theta: np.ndarray) -> np.ndarray:
         """Compute design matrix for given observation angles theta."""
@@ -75,23 +81,14 @@ class Map:
 
         mu0 = np.zeros(img_U.shape[1])
         mu0[0] = 0 # remember to remove the constant term from A before solving! and mean subtract data
-        if sigma_y is not None:
-            m, S, alpha, gamma, log_ev_dict = optimize_alpha_fixed_beta(
-                img_U, y,
-                sigma_y=sigma_y,
-                alpha_guess=1.0,        # scalar or (d,) initial prior precisions
-                mu0=mu0,
-                maxit=5000,
-            )
-        else:
-            m, S, alpha, beta, gamma, log_ev_dict = optimize_alpha_beta(
-                img_U, y,
-                alpha_guess=1.0,        # scalar or (d,) initial prior precisions
-                beta_guess=100.0,
-                mu0=mu0,
-                maxit=5000,
-            )
-        
+        m, S, alpha, beta, gamma, log_ev, log_ev_marginalized = optimize_hyperparameters(
+            img_U, y,
+            sigma_y=sigma_y,
+            alpha_guess=1.0,        # scalar or (d,) initial prior precisions
+            mu0=mu0,
+            maxit=5000,
+        )
+    
         n = Vt.shape[1]
         mean = np.zeros((n))
         cov = np.zeros((n, n))
@@ -101,8 +98,41 @@ class Map:
         mean[:] = img_Vt.T @ m  # back to original space
         cov[:] = img_Vt.T @ S @ img_Vt + nul_Vt.T @ nul_Vt / alpha # important: null space still carry uncertainty!
         
-        return mean, cov, log_ev_dict
+        self.mean = mean
+        self.cov = cov
+        self.flux = y
+        self.flux_err = sigma_y if sigma_y is not None else 1/np.sqrt(beta)
+        self.theta = theta
 
+        return mean, cov, log_ev_marginalized
+    
+    def show(self, projection='ortho', **kwargs):
+        self.map.y[0] = 1.0  # constant term
+        self.map.y[1:] = self.mean
+        self.map.show(projection=projection, **kwargs)
+        return
+    
+    def draw(self, n_samples=10, plot=False, projection='ortho', **kwargs):
+        """Draw random samples from the posterior map distribution."""
+        samples = np.random.multivariate_normal(self.mean, self.cov, size=n_samples)
+        
+        for i in range(n_samples):
+            self.map.y[0] = 1.0
+            self.map.y[1:] = samples[i]
+            self.map.show(projection=projection, **kwargs)
+        return samples
+    
+    def plot_lightcurve(self):
+        if self.flux is None or self.theta is None:
+            print("No light curve data to plot. Run solve_posterior() first.")
+        else:
+            import matplotlib.pyplot as plt
+            plt.errorbar(self.theta, self.flux, yerr=self.flux_err, label='Data')
+            model_flux = self.design_matrix_[:, 1:] @ self.mean
+            plt.plot(self.theta, model_flux, label='Model', color='C1')
+            plt.xlabel('Phase Angle')
+            plt.ylabel('Flux')
+            plt.legend()
 
 
 def fit_ydeg_range(data: LightCurveData, ydeg_min=2, ydeg_max=10):
@@ -124,8 +154,8 @@ def fit_ydeg_range(data: LightCurveData, ydeg_min=2, ydeg_max=10):
         for i_wl in range(n_wl):
             y = data.flux[i_wl]
             sigma_y = data.flux_err[i_wl] if data.flux_err is not None else None
-            mean, cov, log_ev_dict = map.solve_posterior(y, sigma_y=sigma_y, theta=data.theta)
-            log_evs[i_ydeg, i_wl] = log_ev_dict["log_ev_marginalized"]
+            mean, cov, log_ev_marginalized = map.solve_posterior(y, sigma_y=sigma_y, theta=data.theta)
+            log_evs[i_ydeg, i_wl] = log_ev_marginalized
             mean_nwl[i_wl] = mean
             cov_nwl[i_wl] = cov
 
@@ -133,6 +163,7 @@ def fit_ydeg_range(data: LightCurveData, ydeg_min=2, ydeg_max=10):
         coeffs_covs.append(np.array(cov_nwl))
     
     return ydeg_range, log_evs, coeffs_means, coeffs_covs, log_evs
+
 
 def best_ydeg_maps(data: LightCurveData, ydeg_min=2, ydeg_max=10, map_res=30):
     """Get best-fit maps for each wavelength based on evidence over ydeg range."""
