@@ -13,7 +13,7 @@ def test_optimize_hyperparameters_scalar_simple():
     y = A @ w_true + sigma * np.random.randn(N)
     
     # Case 1: Unknown sigma (optimize alpha & beta)
-    m, S, alpha, beta, gamma, res = optimize_hyperparameters(A, y, alpha_guess=1.0)
+    m, S, alpha, beta, gamma, log_ev, log_ev_marginalized = optimize_hyperparameters(A, y, alpha_guess=1.0)
     
     assert m.shape == (K,)
     assert S.shape == (K, K)
@@ -32,7 +32,7 @@ def test_optimize_hyperparameters_fixed_sigma():
     y = A @ w_true + sigma * np.random.randn(N)
     
     # Pass sigma_y as scalar
-    m, S, alpha, beta, gamma, res = optimize_hyperparameters(A, y, sigma_y=sigma, alpha_guess=10.0)
+    m, S, alpha, beta, gamma, log_ev, log_ev_marginalized = optimize_hyperparameters(A, y, sigma_y=sigma, alpha_guess=10.0)
     
     # Beta should be 1.0 (internal pre-whitened) or None depending on return spec?
     # The function returns "beta if not fix_beta else None"
