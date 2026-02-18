@@ -38,9 +38,9 @@ def intensity_to_temperature(intensity: np.ndarray, wavelength: np.ndarray) -> n
     # though physically intensity must be > 0.
     
     val = (h * c) / (wavelength * k)
-    # Planck: I = (2hc^2/lam^5) * 1/(exp(hc/lam k T) - 1)
-    # exp(hc/lam k T) - 1 = 2hc^2 / (lam^5 * I)
-    # T = (hc/lam k) / ln(1 + 2hc^2/(lam^5 * I))
+    # Planck: I = (2hc^2/lambda_fix^5) * 1/(exp(hc/lambda_fix k T) - 1)
+    # exp(hc/lambda_fix k T) - 1 = 2hc^2 / (lambda_fix^5 * I)
+    # T = (hc/lambda_fix k) / ln(1 + 2hc^2/(lambda_fix^5 * I))
     
     term = (2 * h * c**2) / (wavelength**5 * intensity)
     return val / np.log(1 + term)
@@ -216,11 +216,7 @@ class Map:
         y: np.ndarray,
         sigma_y: np.ndarray | None = None,
         theta: np.ndarray | None = None,
-        alpha_fix: float | tuple[float, ...] | np.ndarray | None = None,
-        lam_fix: float | None = None,
-        n_eff_evidence: float | None = None,
-        use_alpha: bool = True,
-        use_lambda: bool = True,
+        lambda_fix: float | None = None,
         verbose: bool = False,
         **kwargs,
     ) -> tuple[np.ndarray, np.ndarray, dict]:
@@ -229,6 +225,13 @@ class Map:
             bad = ", ".join(sorted(kwargs.keys()))
             raise TypeError(f"Unsupported keyword arguments: {bad}")
 
+        if lambda_fix is None:
+            use_lambda = False
+        else:
+            use_lambda = True
+            if lambda_fix <= 0.0:
+                raise ValueError("lambda is a regularization parameter and must be > 0.")
+            
         if theta is None:
             if self.theta is None:
                 raise ValueError("theta must be provided the first time solve_posterior is called.")
@@ -239,36 +242,13 @@ class Map:
 
         A_fit = A_full[:, 1:]
         I_fit = I_full[:, 1:]
+        y_fit = y - A_full[:, 0]
         U, s, Vt = np.linalg.svd(A_fit, full_matrices=False)
         U = U * s[np.newaxis, :]
         null_space = s <= 1e-8
         img_U = U[:, ~null_space]
         nul_Vt = Vt[null_space, :]
         img_Vt = Vt[~null_space, :]
-
-        y_fit = y - A_full[:, 0]
-
-        if self.mode == "rotational":
-            if alpha_fix is None:
-                alpha_fix_fit = 1.0
-            elif np.isscalar(alpha_fix):
-                alpha_fix_fit = float(alpha_fix)
-            else:
-                alpha_arr_in = np.asarray(alpha_fix, dtype=float).ravel()
-                alpha_fix_fit = float(alpha_arr_in[1]) if alpha_arr_in.size >= 2 else float(alpha_arr_in[0])
-        elif self.mode == "eclipse":
-            if alpha_fix is None:
-                alpha_fix_fit = np.array([1.0, 1.0], dtype=float)
-            elif np.isscalar(alpha_fix):
-                alpha_fix_fit = np.array([float(alpha_fix), float(alpha_fix)], dtype=float)
-            else:
-                alpha_arr_in = np.asarray(alpha_fix, dtype=float).ravel()
-                if alpha_arr_in.size == 1:
-                    alpha_fix_fit = np.array([float(alpha_arr_in[0]), float(alpha_arr_in[0])], dtype=float)
-                else:
-                    alpha_fix_fit = alpha_arr_in[:2]
-
-    
         
         lats = self.lats.flatten()
         lons = self.lons.flatten()
@@ -290,51 +270,28 @@ class Map:
         w_pix = dlon * (np.sin(lat_hi) - np.sin(lat_lo))
         w_pix = np.maximum(w_pix, 0.0)
 
-        if use_alpha:
-            I_constraint = I_fit @ img_Vt.T
-            mu0_fit = np.r_[0.0 if self.eclipse_depth is None else float(self.eclipse_depth), np.zeros(img_U.shape[1] - 1)]
-            mean_img, cov_img, alpha, beta_out, lam, log_ev, log_ev_marginalized = optimize_hyperparameters(
-                img_U,
-                y_fit,
-                sigma_y=sigma_y,
-                mu0=mu0_fit,
-                maxit=10000,
-                alpha_fix=alpha_fix_fit,
-                lam_fix=lam_fix,
-                use_alpha=use_alpha,
-                use_lambda=use_lambda,
-                I=I_constraint,
-                w_pix=w_pix,
-                n_eff_evidence=n_eff_evidence,
-                verbose=verbose,
-                n_star=0,
-            )
+        I_constraint = I_fit @ img_Vt.T
+        mu0_fit = np.r_[0.0 if self.eclipse_depth is None else float(self.eclipse_depth), np.zeros(img_U.shape[1] - 1)]
+        mean_img, cov_img, alpha, beta_out, lambda_fix, log_ev, log_ev_marginalized = optimize_hyperparameters(
+            img_U,
+            y_fit,
+            sigma_y=sigma_y,
+            mu0=mu0_fit,
+            maxit=10000,
+            lambda_fix=lambda_fix,
+            use_lambda=use_lambda,
+            I=I_constraint,
+            w_pix=w_pix,
+            verbose=verbose,
+        )
 
-            mean_fit = img_Vt.T @ mean_img
-        
-            alpha_arr = np.asarray(alpha, dtype=float).ravel()
-            alpha_eff = float(alpha_arr[1]) if alpha_arr.size >= 2 else (float(alpha_arr[-1]) if alpha_arr.size > 0 else 1e-12)
-            alpha_eff = max(alpha_eff, 1e-12)
-            cov_fit = img_Vt.T @ cov_img @ img_Vt + nul_Vt.T @ nul_Vt / alpha_eff
-        else:
-            I_constraint = I_fit
-            mu0_fit = np.r_[0.0 if self.eclipse_depth is None else float(self.eclipse_depth), np.zeros(A_fit.shape[1] - 1)]
-            mean_fit, cov_fit, alpha, beta_out, lam, log_ev, log_ev_marginalized = optimize_hyperparameters(
-                A_fit,
-                y_fit,
-                sigma_y=sigma_y,
-                mu0=mu0_fit,
-                maxit=10000,
-                alpha_fix=alpha_fix_fit,
-                lam_fix=lam_fix,
-                use_alpha=use_alpha,
-                use_lambda=use_lambda,
-                I=I_constraint,
-                w_pix=w_pix,
-                n_eff_evidence=n_eff_evidence,
-                verbose=verbose,
-                n_star=0,
-            )
+        mean_fit = img_Vt.T @ mean_img
+    
+        alpha_arr = np.asarray(alpha, dtype=float).ravel()
+        alpha_eff = float(alpha_arr[1]) if alpha_arr.size >= 2 else (float(alpha_arr[-1]) if alpha_arr.size > 0 else 1e-12)
+        alpha_eff = max(alpha_eff, 1e-12)
+        cov_fit = img_Vt.T @ cov_img @ img_Vt + nul_Vt.T @ nul_Vt / alpha_eff
+
 
         mean = np.zeros(A_full.shape[1])
         mean[0] = 1.0
@@ -343,40 +300,37 @@ class Map:
         cov[1:, 1:] = cov_fit
 
         alpha_arr = np.asarray(alpha, dtype=float).ravel()
-        if use_alpha:
-            alpha_h = alpha_arr.tolist() if alpha_arr.size > 1 else float(alpha_arr[0])
-        else:
-            alpha_h = "disabled"
+        alpha_h = alpha_arr.tolist() if alpha_arr.size > 1 else float(alpha_arr[0])
 
         self.hyper = {
             "alpha": alpha_h,
             "beta": None if beta_out is None else float(beta_out),
-            "lam": float(lam),
+            "lambda_fix": lambda_fix,
             "log_ev": float(log_ev),
             "log_ev_marginalized": float(log_ev_marginalized),
             "planet_area_sr": float(np.sum(w_pix)),
         }
 
-        if use_alpha and (self.mode == "eclipse") and (alpha_arr.size == 2):
+        if (self.mode == "eclipse") and (alpha_arr.size == 2):
             self.hyper["alpha_constant"] = float(alpha_arr[0])
             self.hyper["alpha_harmonic"] = float(alpha_arr[1])
-        elif use_alpha and (self.mode == "rotational"):
+        elif (self.mode == "rotational"):
             self.hyper["alpha_harmonic"] = float(alpha_arr[0]) if alpha_arr.size > 0 else np.nan
 
         if verbose:
-            if use_alpha and (self.mode == "eclipse") and (alpha_arr.size == 2):
+            if (self.mode == "eclipse") and (alpha_arr.size == 2):
                 alpha_print = (
                     f"alpha_constant={self.hyper['alpha_constant']}, "
                     f"alpha_harmonic={self.hyper['alpha_harmonic']}"
                 )
-            elif use_alpha and (self.mode == "rotational"):
+            elif (self.mode == "rotational"):
                 alpha_print = f"alpha_harmonic={self.hyper['alpha_harmonic']}"
             else:
                 alpha_print = f"alpha={alpha_h}"
             print(
                 f"Optimized hyperparameters: {alpha_print}, beta={beta_out if beta_out is not None else 'uncertainties provided'}, "
-                f"lam={lam}, log_ev={log_ev}, log_ev_marginalized={log_ev_marginalized}"
-            )
+                f"lambda_fix={lambda_fix}, log_ev={log_ev}, log_ev_marginalized={log_ev_marginalized}"
+            )   
 
         self.mean = mean
         self.cov = cov
@@ -432,16 +386,13 @@ class Maps:
         mode: str,
         ydegs: np.ndarray,
         map_res=30,
-        use_alpha=True,
-        use_lambda=True,
         verbose=True,
         n_eff_evidence: float | None = None,
     ):
         self.mode = mode
         self.ydegs = ydegs
         self.map_res = map_res
-        self.use_alpha = use_alpha
-        self.use_lambda = use_lambda
+        self.lambda_fix = None
         self.verbose = verbose
         self.n_eff_evidence = n_eff_evidence
         self.moll_mask = None
@@ -475,9 +426,7 @@ class Maps:
                     y,
                     sigma_y=sigma_y,
                     theta=data.theta,
-                    n_eff_evidence=self.n_eff_evidence,
-                    use_alpha=self.use_alpha,
-                    use_lambda=self.use_lambda,
+                    lambda_fix=self.lambda_fix,
                     verbose=self.verbose,
                 )
                 log_evs[i_ydeg, i_wl] = log_ev_marginalized
@@ -507,7 +456,9 @@ class Maps:
         
 
         moll_mask = map.moll_mask
+        moll_mask_flat = moll_mask.flatten()
         self.moll_mask = moll_mask
+        self.moll_mask_flat = moll_mask_flat
         self.lats = map.lats
         self.lons = map.lons
         n_wl = data.flux.shape[0]
@@ -520,7 +471,7 @@ class Maps:
             i_ydeg = i_ydeg_best[i_wl]
             ydeg = ydegs[i_ydeg]
             I = I_cached[i_ydeg]
-            I_use = I[moll_mask, :]
+            I_use = I[moll_mask_flat, :]
 
             mean = coeffs_means[i_ydeg][i_wl]
             cov = coeffs_covs[i_ydeg][i_wl]
