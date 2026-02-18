@@ -13,7 +13,7 @@ def test_optimize_hyperparameters_scalar_simple():
     y = A @ w_true + sigma * np.random.randn(N)
     
     # Case 1: Unknown sigma (optimize alpha & beta)
-    m, S, alpha, beta, gamma, log_ev, log_ev_marginalized = optimize_hyperparameters(A, y, alpha_guess=1.0)
+    m, S, alpha, beta, gamma, log_ev, log_ev_marginalized = optimize_hyperparameters(A, y)
     
     assert m.shape == (K,)
     assert S.shape == (K, K)
@@ -32,7 +32,7 @@ def test_optimize_hyperparameters_fixed_sigma():
     y = A @ w_true + sigma * np.random.randn(N)
     
     # Pass sigma_y as scalar
-    m, S, alpha, beta, gamma, log_ev, log_ev_marginalized = optimize_hyperparameters(A, y, sigma_y=sigma, alpha_guess=10.0)
+    m, S, alpha, beta, gamma, log_ev, log_ev_marginalized = optimize_hyperparameters(A, y, sigma_y=sigma)
     
     # Beta should be 1.0 (internal pre-whitened) or None depending on return spec?
     # The function returns "beta if not fix_beta else None"
@@ -46,15 +46,11 @@ def test_optimize_hyperparameters_fixed_sigma():
     # With limited data, just checking it runs.
 
 def test_alpha_scalar_enforcement():
-    """Ensure vector input for alpha is converted or handled (if possible) or doc is respected."""
+    """alpha_guess is no longer a public argument."""
     np.random.seed(42)
     N, K = 10, 2
     A = np.random.randn(N, K)
     y = np.random.randn(N)
-    
-    # Passing a vector alpha_guess should be cast to scalar (first element or sum? code says float(guess))
-    # My code: alpha = float(alpha_guess)
-    # If a vector is passed, float([1,2]) raises TypeError in Python.
     
     with pytest.raises(TypeError):
         optimize_hyperparameters(A, y, alpha_guess=np.array([1.0, 2.0]))

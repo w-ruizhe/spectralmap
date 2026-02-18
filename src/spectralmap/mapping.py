@@ -7,11 +7,43 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import numpy as np
+from scipy import constants
 
 import starry
 # starry.config.lazy = False  # disable lazy evaluation
 # starry.config.quiet = True  # disable warnings
 from spectralmap.bayesian_linalg import optimize_hyperparameters
+
+def intensity_to_temperature(intensity: np.ndarray, wavelength: np.ndarray) -> np.ndarray:
+    """
+    Convert spectral intensity to brightness temperature using the inverse Planck function.
+    
+    Parameters
+    ----------
+    intensity : np.ndarray
+        Spectral intensity in SI units (W/m^2/sr/m).
+    wavelength : np.ndarray
+        Wavelength in meters.
+        
+    Returns
+    -------
+    np.ndarray
+        Brightness temperature in Kelvin.
+    """
+    h = constants.h
+    c = constants.c
+    k = constants.k
+    
+    # Avoid division by zero warnings by using a tiny lower bound if needed, 
+    # though physically intensity must be > 0.
+    
+    val = (h * c) / (wavelength * k)
+    # Planck: I = (2hc^2/lam^5) * 1/(exp(hc/lam k T) - 1)
+    # exp(hc/lam k T) - 1 = 2hc^2 / (lam^5 * I)
+    # T = (hc/lam k) / ln(1 + 2hc^2/(lam^5 * I))
+    
+    term = (2 * h * c**2) / (wavelength**5 * intensity)
+    return val / np.log(1 + term)
 
 @dataclass
 class LightCurveData:
@@ -23,14 +55,69 @@ class LightCurveData:
         self.wavelength = wavelength
         self.inc = inc
 
+
+def expand_moll_values(values: np.ndarray, moll_mask: np.ndarray, fill_value=np.nan) -> np.ndarray:
+    """Expand masked pixel values back to full map pixel length.
+
+    Parameters
+    ----------
+    values : np.ndarray
+        Array whose last dimension is the number of valid moll pixels.
+    moll_mask : np.ndarray
+        Boolean mask over full pixels (flat or map_res x map_res).
+    fill_value : float
+        Fill value for invalid pixels.
+    """
+    values = np.asarray(values)
+    mask = np.asarray(moll_mask, dtype=bool).ravel()
+
+    if values.shape[-1] != int(mask.sum()):
+        raise ValueError(
+            f"values last dimension ({values.shape[-1]}) does not match number of valid pixels ({int(mask.sum())})."
+        )
+
+    out_shape = values.shape[:-1] + (mask.size,)
+    out = np.full(out_shape, fill_value, dtype=float)
+    out[..., mask] = values
+    return out
+
 class Map:
-    """A helper mapping class wraps starry.Map."""
-    def __init__(self, ydeg: int = 5, inc: int = 90, map_res: int = 30, map_type: str = 'Use starry.Map'):
-        self.type = map_type
-        self.inc = inc
-        self.map = starry.Map(ydeg=ydeg, inc=inc)
-        lats, lons = self.map.get_latlon_grid(res=map_res, projection='rect')
-        self.lats, self.lons = lats, lons
+    """Unified mapping interface for rotational and eclipse workflows.
+
+    Parameters
+    ----------
+    mode : str
+        Either ``'rotational'`` (default) or ``'eclipse'``.
+    pri, sec : optional
+        Required only for ``mode='eclipse'``.
+    """
+    def __init__(
+        self,
+        mode: str | None = "rotational",
+        map_res: int | None = 30,
+        ydeg: int | None = None,
+        inc: int | None = None,
+        pri: starry.Primary | None = None,
+        sec: starry.Secondary | None = None,
+    ):
+        mode_norm = str(mode).lower()
+        if mode_norm in {"rot", "rotational"}:
+            self.mode = "rotational"
+            self.inc = inc
+            self.map = starry.Map(ydeg=ydeg, inc=inc)
+            
+        elif mode_norm in {"ecl", "eclipse"}:
+            if pri is None or sec is None:
+                raise ValueError("mode='eclipse' requires both pri and sec.")
+            self.mode = "eclipse"
+            self.inc = None
+            self.pri = pri
+            self.sec = sec
+            self.sys = starry.System(pri, sec)
+            self.map = self.sec.map
+        else:
+            raise ValueError("mode must be one of {'rotational', 'eclipse'}")
+
         self.map_res = map_res
         self.ydeg = ydeg
         self.mean = None
@@ -38,33 +125,82 @@ class Map:
         self.flux = None
         self.flux_err = None
         self.theta = None
-
+        self.hyper = None
+        self.eclipse_depth = None
         
     def design_matrix(self, theta: np.ndarray) -> np.ndarray:
         """Compute design matrix for given observation angles theta."""
-        A = self.map.design_matrix(theta=theta)
-        
-        # Evaluate to numpy if it's a theano/tensor variable
-        if hasattr(A, 'eval'):
-            A = A.eval()
-            
-        self.design_matrix_ = A
-        self.theta = theta
+        if self.mode == "eclipse":
+            A_full = self.sys.design_matrix(theta)
+            if hasattr(A_full, 'eval'):
+                A_full = A_full.eval()
+            A_full = np.asarray(A_full)
+            A_star = A_full[:, :1]
+            A_planet = A_full[:, 4:]
+            A = np.column_stack((A_star, A_planet))
+            self.A_star = A_star
+            self.A_planet = A_planet
+            self.design_matrix_ = A
+            self.theta = theta
+            return A
+        elif self.mode == "rotational":
+            A = self.map.design_matrix(theta=theta)
+            if hasattr(A, 'eval'):
+                A = A.eval()
+            A = np.asarray(A)
+            self.design_matrix_ = A
+            self.theta = theta
+        else:
+            raise ValueError(f"Unknown mode: {self.mode}. Currently only 'rotational' and 'eclipse' are supported.")
         return A
     
-    def intensity_design_matrix(self) -> np.ndarray:
+    def intensity_design_matrix(self, proj: str = "rect") -> np.ndarray:
         """Compute intensity design matrix for given lat/lon grid."""
-        I = self.map.intensity_design_matrix(lat=self.lats.flatten(), lon=self.lons.flatten())
-        if hasattr(I, 'eval'):
-            I = I.eval()
-        self.intensity_design_matrix_ = I
+
+        lats, lons = self.map.get_latlon_grid(res=self.map_res, projection=proj)
+        if hasattr(lats, 'eval'):
+            lats = lats.eval()
+        if hasattr(lons, 'eval'):
+            lons = lons.eval()
+        self.proj = proj
+        self.lats, self.lons = lats, lons
+        self.moll_mask = np.isfinite(self.lats) & np.isfinite(self.lons)
+        self.moll_mask_flat = self.moll_mask.flatten()
+        lat_flat = self.lats.flatten()
+        lon_flat = self.lons.flatten()
+        mask = self.moll_mask_flat
+
+        lat_safe = np.where(mask, lat_flat, 0.0)
+        lon_safe = np.where(mask, lon_flat, 0.0)
+
+        if self.mode == "eclipse":
+            I_planet = self.sec.map.intensity_design_matrix(lat=lat_safe, lon=lon_safe)
+            if hasattr(I_planet, 'eval'):
+                I_planet = I_planet.eval()
+            I_planet = np.asarray(I_planet)
+            
+            if I_planet.shape[0] == mask.shape[0]:
+                I_planet[~mask, :] = 0.0
+            self.I_planet = I_planet
+            I = np.column_stack((np.zeros((I_planet.shape[0], 1)), I_planet))
+            self.intensity_design_matrix_ = I
+        
+        elif self.mode == "rotational":
+            I = self.map.intensity_design_matrix(lat=lat_safe, lon=lon_safe)
+            if hasattr(I, 'eval'):
+                I = I.eval()
+            I = np.asarray(I)
+            if I.shape[0] == mask.shape[0]:
+                I[~mask, :] = 0.0
+            self.intensity_design_matrix_ = I
+        else:
+            raise ValueError(f"Unknown mode: {self.mode}. Only 'rotational' and 'eclipse' are supported.")
+        
         return I
     
     def eigenmap_decomposition(self, theta: np.ndarray) -> np.ndarray:
         """Compute eigenmap image space"""
         A = self.design_matrix(theta)
-        A = A[:, 1:]  # remove constant term
-        A = A - A.mean(axis=0, keepdims=True) # center design matrix columns (only care about modulation)
         U, s, Vt = np.linalg.svd(A, full_matrices=False)
         U = U * s[np.newaxis, :]  # scale U by singular values
         null_space = s <= 1e-8
@@ -75,41 +211,189 @@ class Map:
         
         return U, Vt, nul_U, img_U, nul_Vt, img_Vt
     
-    def solve_posterior(self, y: np.ndarray, sigma_y: np.ndarray | None = None, theta: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, dict]:
-        """Solve for posterior map coefficients given data."""
-        U, Vt, nul_U, img_U, nul_Vt, img_Vt = self.eigenmap_decomposition(theta)
+    def solve_posterior(
+        self,
+        y: np.ndarray,
+        sigma_y: np.ndarray | None = None,
+        theta: np.ndarray | None = None,
+        alpha_fix: float | tuple[float, ...] | np.ndarray | None = None,
+        lam_fix: float | None = None,
+        n_eff_evidence: float | None = None,
+        use_alpha: bool = True,
+        use_lambda: bool = True,
+        verbose: bool = False,
+        **kwargs,
+    ) -> tuple[np.ndarray, np.ndarray, dict]:
+        """Solve posterior in reduced SVD/eigencurve space, then project back."""
+        if kwargs:
+            bad = ", ".join(sorted(kwargs.keys()))
+            raise TypeError(f"Unsupported keyword arguments: {bad}")
 
-        mu0 = np.zeros(img_U.shape[1])
-        mu0[0] = 0 # remember to remove the constant term from A before solving! and mean subtract data
-        m, S, alpha, beta, gamma, log_ev, log_ev_marginalized = optimize_hyperparameters(
-            img_U, y,
-            sigma_y=sigma_y,
-            alpha_guess=1.0,        # scalar or (d,) initial prior precisions
-            mu0=mu0,
-            maxit=5000,
-        )
+        if theta is None:
+            if self.theta is None:
+                raise ValueError("theta must be provided the first time solve_posterior is called.")
+            theta = self.theta
+
+        A_full = self.design_matrix(theta)
+        I_full = self.intensity_design_matrix()
+
+        A_fit = A_full[:, 1:]
+        I_fit = I_full[:, 1:]
+        U, s, Vt = np.linalg.svd(A_fit, full_matrices=False)
+        U = U * s[np.newaxis, :]
+        null_space = s <= 1e-8
+        img_U = U[:, ~null_space]
+        nul_Vt = Vt[null_space, :]
+        img_Vt = Vt[~null_space, :]
+
+        y_fit = y - A_full[:, 0]
+
+        if self.mode == "rotational":
+            if alpha_fix is None:
+                alpha_fix_fit = 1.0
+            elif np.isscalar(alpha_fix):
+                alpha_fix_fit = float(alpha_fix)
+            else:
+                alpha_arr_in = np.asarray(alpha_fix, dtype=float).ravel()
+                alpha_fix_fit = float(alpha_arr_in[1]) if alpha_arr_in.size >= 2 else float(alpha_arr_in[0])
+        elif self.mode == "eclipse":
+            if alpha_fix is None:
+                alpha_fix_fit = np.array([1.0, 1.0], dtype=float)
+            elif np.isscalar(alpha_fix):
+                alpha_fix_fit = np.array([float(alpha_fix), float(alpha_fix)], dtype=float)
+            else:
+                alpha_arr_in = np.asarray(alpha_fix, dtype=float).ravel()
+                if alpha_arr_in.size == 1:
+                    alpha_fix_fit = np.array([float(alpha_arr_in[0]), float(alpha_arr_in[0])], dtype=float)
+                else:
+                    alpha_fix_fit = alpha_arr_in[:2]
+
     
-        n = Vt.shape[1]
-        mean = np.zeros((n))
-        cov = np.zeros((n, n))
-        nul_dim = nul_Vt.shape[0]
-        img_dim = img_Vt.shape[0]
-        assert img_dim == m.shape[0] # sanity check
-        mean[:] = img_Vt.T @ m  # back to original space
-        cov[:] = img_Vt.T @ S @ img_Vt + nul_Vt.T @ nul_Vt / alpha # important: null space still carry uncertainty!
         
+        lats = self.lats.flatten()
+        lons = self.lons.flatten()
+
+        lat_u = np.unique(lats)
+        lon_u = np.unique(lons)
+        if lat_u.size > 1:
+            dlat = np.deg2rad(np.median(np.diff(np.sort(lat_u))))
+        else:
+            dlat = np.deg2rad(180.0)
+        if lon_u.size > 1:
+            dlon = np.deg2rad(np.median(np.diff(np.sort(lon_u))))
+        else:
+            dlon = np.deg2rad(360.0)
+
+        lat_r = np.deg2rad(lats)
+        lat_lo = np.clip(lat_r - 0.5 * dlat, -0.5 * np.pi, 0.5 * np.pi)
+        lat_hi = np.clip(lat_r + 0.5 * dlat, -0.5 * np.pi, 0.5 * np.pi)
+        w_pix = dlon * (np.sin(lat_hi) - np.sin(lat_lo))
+        w_pix = np.maximum(w_pix, 0.0)
+
+        if use_alpha:
+            I_constraint = I_fit @ img_Vt.T
+            mu0_fit = np.r_[0.0 if self.eclipse_depth is None else float(self.eclipse_depth), np.zeros(img_U.shape[1] - 1)]
+            mean_img, cov_img, alpha, beta_out, lam, log_ev, log_ev_marginalized = optimize_hyperparameters(
+                img_U,
+                y_fit,
+                sigma_y=sigma_y,
+                mu0=mu0_fit,
+                maxit=10000,
+                alpha_fix=alpha_fix_fit,
+                lam_fix=lam_fix,
+                use_alpha=use_alpha,
+                use_lambda=use_lambda,
+                I=I_constraint,
+                w_pix=w_pix,
+                n_eff_evidence=n_eff_evidence,
+                verbose=verbose,
+                n_star=0,
+            )
+
+            mean_fit = img_Vt.T @ mean_img
+        
+            alpha_arr = np.asarray(alpha, dtype=float).ravel()
+            alpha_eff = float(alpha_arr[1]) if alpha_arr.size >= 2 else (float(alpha_arr[-1]) if alpha_arr.size > 0 else 1e-12)
+            alpha_eff = max(alpha_eff, 1e-12)
+            cov_fit = img_Vt.T @ cov_img @ img_Vt + nul_Vt.T @ nul_Vt / alpha_eff
+        else:
+            I_constraint = I_fit
+            mu0_fit = np.r_[0.0 if self.eclipse_depth is None else float(self.eclipse_depth), np.zeros(A_fit.shape[1] - 1)]
+            mean_fit, cov_fit, alpha, beta_out, lam, log_ev, log_ev_marginalized = optimize_hyperparameters(
+                A_fit,
+                y_fit,
+                sigma_y=sigma_y,
+                mu0=mu0_fit,
+                maxit=10000,
+                alpha_fix=alpha_fix_fit,
+                lam_fix=lam_fix,
+                use_alpha=use_alpha,
+                use_lambda=use_lambda,
+                I=I_constraint,
+                w_pix=w_pix,
+                n_eff_evidence=n_eff_evidence,
+                verbose=verbose,
+                n_star=0,
+            )
+
+        mean = np.zeros(A_full.shape[1])
+        mean[0] = 1.0
+        mean[1:] = mean_fit
+        cov = np.zeros((A_full.shape[1], A_full.shape[1]))
+        cov[1:, 1:] = cov_fit
+
+        alpha_arr = np.asarray(alpha, dtype=float).ravel()
+        if use_alpha:
+            alpha_h = alpha_arr.tolist() if alpha_arr.size > 1 else float(alpha_arr[0])
+        else:
+            alpha_h = "disabled"
+
+        self.hyper = {
+            "alpha": alpha_h,
+            "beta": None if beta_out is None else float(beta_out),
+            "lam": float(lam),
+            "log_ev": float(log_ev),
+            "log_ev_marginalized": float(log_ev_marginalized),
+            "planet_area_sr": float(np.sum(w_pix)),
+        }
+
+        if use_alpha and (self.mode == "eclipse") and (alpha_arr.size == 2):
+            self.hyper["alpha_constant"] = float(alpha_arr[0])
+            self.hyper["alpha_harmonic"] = float(alpha_arr[1])
+        elif use_alpha and (self.mode == "rotational"):
+            self.hyper["alpha_harmonic"] = float(alpha_arr[0]) if alpha_arr.size > 0 else np.nan
+
+        if verbose:
+            if use_alpha and (self.mode == "eclipse") and (alpha_arr.size == 2):
+                alpha_print = (
+                    f"alpha_constant={self.hyper['alpha_constant']}, "
+                    f"alpha_harmonic={self.hyper['alpha_harmonic']}"
+                )
+            elif use_alpha and (self.mode == "rotational"):
+                alpha_print = f"alpha_harmonic={self.hyper['alpha_harmonic']}"
+            else:
+                alpha_print = f"alpha={alpha_h}"
+            print(
+                f"Optimized hyperparameters: {alpha_print}, beta={beta_out if beta_out is not None else 'uncertainties provided'}, "
+                f"lam={lam}, log_ev={log_ev}, log_ev_marginalized={log_ev_marginalized}"
+            )
+
         self.mean = mean
         self.cov = cov
         self.flux = y
-        self.flux_err = sigma_y if sigma_y is not None else 1/np.sqrt(beta)
+        self.flux_err = sigma_y if sigma_y is not None else (np.nan if beta_out is None else 1 / np.sqrt(beta_out))
         self.theta = theta
 
         return mean, cov, log_ev_marginalized
     
     def show(self, projection='ortho', **kwargs):
-        self.map.y[0] = 1.0  # constant term
-        self.map.y[1:] = self.mean
-        self.map.show(projection=projection, **kwargs)
+        if self.mode == "eclipse":
+            self.sec.map[:, :] = self.mean[1:]
+            self.sec.map.show(projection=projection, **kwargs)
+        elif self.mode == "rotational":
+            self.map[:, :] = self.mean
+            self.map.show(projection=projection, **kwargs)
+
         return
     
     def draw(self, n_samples=10, plot=False, projection='ortho', **kwargs):
@@ -117,9 +401,12 @@ class Map:
         samples = np.random.multivariate_normal(self.mean, self.cov, size=n_samples)
         
         for i in range(n_samples):
-            self.map.y[0] = 1.0
-            self.map.y[1:] = samples[i]
-            self.map.show(projection=projection, **kwargs)
+            if self.mode == "eclipse":
+                self.sec.map[:, :] = samples[i][1:]
+                self.sec.map.show(projection=projection, **kwargs)
+            else:
+                self.map[:, :] = samples[i]
+                self.map.show(projection=projection, **kwargs)
         return samples
     
     def plot_lightcurve(self):
@@ -128,66 +415,233 @@ class Map:
         else:
             import matplotlib.pyplot as plt
             plt.errorbar(self.theta, self.flux, yerr=self.flux_err, label='Data')
-            model_flux = self.design_matrix_[:, 1:] @ self.mean
-            plt.plot(self.theta, model_flux, label='Model', color='C1')
+            model_flux = self.design_matrix_ @ self.mean
+            plt.plot(self.theta, model_flux, label='Model', color='C1', zorder=10)
             plt.xlabel('Phase Angle')
             plt.ylabel('Flux')
             plt.legend()
 
 
-def fit_ydeg_range(data: LightCurveData, ydeg_min=2, ydeg_max=10):
-    """Determine best spherical harmonic degree based on evidence."""
-    ydeg_range = np.arange(ydeg_min, ydeg_max+1)
-    ydeg_range = ydeg_range[ydeg_range%2 == 0]  # only even degrees
-    n_wl = data.flux.shape[0]
-    log_evs =  np.zeros((len(ydeg_range), n_wl))
-    coeffs_means = []
-    coeffs_covs = []
-    inc = data.inc
-    
-    for i_ydeg, ydeg in enumerate(ydeg_range):
-        map = Map(ydeg=ydeg)
-        map.map.inc = inc
-        mean_nwl = np.zeros((n_wl, map.map.Ny-1))
-        cov_nwl = np.zeros((n_wl, map.map.Ny-1, map.map.Ny-1))
 
+
+class Maps:
+    '''Collection of mapping utilities for multi-wavelength data.'''
+    
+    def __init__(
+        self,
+        mode: str,
+        ydegs: np.ndarray,
+        map_res=30,
+        use_alpha=True,
+        use_lambda=True,
+        verbose=True,
+        n_eff_evidence: float | None = None,
+    ):
+        self.mode = mode
+        self.ydegs = ydegs
+        self.map_res = map_res
+        self.use_alpha = use_alpha
+        self.use_lambda = use_lambda
+        self.verbose = verbose
+        self.n_eff_evidence = n_eff_evidence
+        self.moll_mask = None
+        self.lats = None
+        self.lons = None
+
+
+    def fit_all_ydegs(self, data: LightCurveData):
+        """Fit maps across all ydeg values, returning evidence and coefficients for each wavelength."""
+        if self.mode == "rotational" and data.inc == 90:
+            ydegs = self.ydegs[self.ydegs % 2 == 0] # null space
+        else:
+            ydegs = self.ydegs
+        
+        n_wl = data.flux.shape[0]
+        n_ydeg = len(ydegs)
+        log_evs = np.zeros((len(ydegs), n_wl))
+        coeffs_means = []
+        coeffs_covs = []
+        wl_done_counts = np.zeros(n_wl, dtype=int)
+
+        for i_ydeg, ydeg in enumerate(ydegs):
+            map_obj = Map(ydeg=ydeg, inc=data.inc, mode=self.mode)
+            mean_nwl = np.zeros((n_wl, map_obj.map.Ny))
+            cov_nwl = np.zeros((n_wl, map_obj.map.Ny, map_obj.map.Ny))
+
+            for i_wl in range(n_wl):
+                y = data.flux[i_wl]
+                sigma_y = data.flux_err[i_wl] if data.flux_err is not None else None
+                mean, cov, log_ev_marginalized = map_obj.solve_posterior(
+                    y,
+                    sigma_y=sigma_y,
+                    theta=data.theta,
+                    n_eff_evidence=self.n_eff_evidence,
+                    use_alpha=self.use_alpha,
+                    use_lambda=self.use_lambda,
+                    verbose=self.verbose,
+                )
+                log_evs[i_ydeg, i_wl] = log_ev_marginalized
+                mean_nwl[i_wl] = mean
+                cov_nwl[i_wl] = cov
+                wl_done_counts[i_wl] += 1
+                if self.verbose and wl_done_counts[i_wl] == n_ydeg:
+                    ydeg_best_i = ydegs[np.argmax(log_evs[:, i_wl])]
+                    print(f"Wavelength {i_wl+1}/{n_wl}: best ydeg={ydeg_best_i}")
+
+            coeffs_means.append(np.array(mean_nwl))
+            coeffs_covs.append(np.array(cov_nwl))
+
+        return ydegs, log_evs, coeffs_means, coeffs_covs, log_evs
+
+
+    def best_ydeg_maps(self, data: LightCurveData):
+        """Get best-fit maps for each wavelength based on evidence over ydeg range."""
+        ydegs, log_evs, coeffs_means, coeffs_covs, log_evs = self.fit_all_ydegs(data)
+
+        i_ydeg_best = np.argmax(log_evs, axis=0)
+        I_cached = []
+        for ydeg in ydegs:
+            map = Map(mode=self.mode, map_res=self.map_res, ydeg=ydeg, inc=data.inc)
+            I = map.intensity_design_matrix(proj="moll")
+            I_cached.append(I)
+        
+
+        moll_mask = map.moll_mask
+        self.moll_mask = moll_mask
+        self.lats = map.lats
+        self.lons = map.lons
+        n_wl = data.flux.shape[0]
+        n_pix = int(moll_mask.sum())
+
+        I_all_wl = np.zeros((n_wl, n_pix))
+        I_cov_all_wl = np.zeros((n_wl, n_pix, n_pix))
+        ydeg_all_wl = np.zeros(n_wl, dtype=int)
         for i_wl in range(n_wl):
-            y = data.flux[i_wl]
-            sigma_y = data.flux_err[i_wl] if data.flux_err is not None else None
-            mean, cov, log_ev_marginalized = map.solve_posterior(y, sigma_y=sigma_y, theta=data.theta)
-            log_evs[i_ydeg, i_wl] = log_ev_marginalized
-            mean_nwl[i_wl] = mean
-            cov_nwl[i_wl] = cov
+            i_ydeg = i_ydeg_best[i_wl]
+            ydeg = ydegs[i_ydeg]
+            I = I_cached[i_ydeg]
+            I_use = I[moll_mask, :]
 
-        coeffs_means.append(np.array(mean_nwl))
-        coeffs_covs.append(np.array(cov_nwl))
-    
-    return ydeg_range, log_evs, coeffs_means, coeffs_covs, log_evs
+            mean = coeffs_means[i_ydeg][i_wl]
+            cov = coeffs_covs[i_ydeg][i_wl]
+            I_all_wl[i_wl] = I_use @ mean.T
+            I_cov_all_wl[i_wl] = I_use @ cov @ I_use.T
+            ydeg_all_wl[i_wl] = ydeg
+
+        return ydeg_all_wl, I_all_wl, I_cov_all_wl
+
+    @classmethod
+    def plot(
+        cls,
+        values_by_wavelength: np.ndarray,
+        moll_mask: np.ndarray | None = None,
+        iw: int = 0,
+        map_res: int | None = None,
+        wl: np.ndarray | None = None,
+        cbar_label: str = "Flux density",
+        cmap: str = "inferno",
+        levels: int = 200,
+        smooth_boundary: bool = True,
+        hide_ticks: bool = True,
+        show_grid: bool = True,
+        ax=None,
+    ):
+        """Plot a starry-like Mollweide map, handling masked/full inputs internally."""
+        import matplotlib.pyplot as plt
+
+        values = np.asarray(values_by_wavelength)
+        if values.ndim == 1:
+            values = values[None, :]
+
+        n_pix_in = values.shape[-1]
+
+        if moll_mask is not None:
+            mask = np.asarray(moll_mask, dtype=bool).ravel()
+            if map_res is None:
+                map_res = int(np.sqrt(mask.size))
+
+            if n_pix_in == mask.size:
+                full = values
+            elif n_pix_in == int(mask.sum()):
+                full = expand_moll_values(values, mask)
+            else:
+                raise ValueError(
+                    f"values last dimension ({n_pix_in}) does not match full ({mask.size}) or masked ({int(mask.sum())}) pixel count."
+                )
+        else:
+            if map_res is None:
+                root = int(np.sqrt(n_pix_in))
+                if root * root == n_pix_in:
+                    map_res = root
+                    full = values
+                else:
+                    raise ValueError(
+                        "Cannot infer map resolution from masked values. Provide map_res; mask handling is done internally."
+                    )
+            else:
+                full_pix = int(map_res) * int(map_res)
+                if n_pix_in == full_pix:
+                    full = values
+                else:
+                    temp_map = cls(map_res=map_res, grid_projection="moll")
+                    mask = temp_map.moll_mask_flat
+                    if n_pix_in != int(mask.sum()):
+                        raise ValueError(
+                            f"values last dimension ({n_pix_in}) does not match expected masked pixel count ({int(mask.sum())}) for map_res={map_res}."
+                        )
+                    full = expand_moll_values(values, mask)
+
+        img = full[iw].reshape(map_res, map_res)
+
+        lon = np.linspace(-np.pi, np.pi, map_res)
+        lat = np.linspace(-0.5 * np.pi, 0.5 * np.pi, map_res)
+        lon2d, lat2d = np.meshgrid(lon, lat)
+
+        if smooth_boundary:
+            from scipy.ndimage import distance_transform_edt
+
+            img_plot = img.copy()
+            valid = np.isfinite(img_plot)
+            nearest_idx = distance_transform_edt(~valid, return_distances=False, return_indices=True)
+            img_plot[~valid] = img_plot[tuple(nearest_idx[:, ~valid])]
+        else:
+            img_plot = np.ma.masked_invalid(img)
+
+        if ax is None:
+            fig = plt.figure(figsize=(8, 4.5))
+            ax = fig.add_subplot(111, projection="mollweide")
+        else:
+            fig = ax.figure
+
+        pcm = ax.contourf(lon2d, lat2d, img_plot, levels=levels, cmap=cmap)
+
+        if show_grid:
+            ax.grid(True, alpha=0.3)
+
+        cb = fig.colorbar(pcm, ax=ax, pad=0.08)
+        cb.set_label(cbar_label)
+
+        if wl is None:
+            ax.set_title(f"Mollweide map (wavelength bin {iw})")
+        else:
+            ax.set_title(f"{wl[iw]: .2f} $\\mu$m")
+
+        if hide_ticks:
+            ax.set_xticklabels([])
+            ax.set_yticklabels([])
+
+        return fig, ax, pcm
 
 
-def best_ydeg_maps(data: LightCurveData, ydeg_min=2, ydeg_max=10, map_res=30):
-    """Get best-fit maps for each wavelength based on evidence over ydeg range."""
-    ydeg_range, log_evs, coeffs_means, coeffs_covs, log_evs = fit_ydeg_range(data, ydeg_min=ydeg_min, ydeg_max=ydeg_max)
-    i_ydeg_best = np.argmax(log_evs, axis=0) # best i_ydeg for each wavelength
-    I_cached = []
-    for i, ydeg in enumerate(ydeg_range):
-        map = Map(ydeg=ydeg, map_res=map_res)
-        map.map.inc = data.inc
-        I = map.intensity_design_matrix()
-        I_cached.append(I)
-    n_wl = data.flux.shape[0]
-    I_all_wl = np.zeros((n_wl, map_res * map_res))
-    I_cov_all_wl = np.zeros((n_wl, map_res * map_res, map_res * map_res))
-    ydeg_all_wl = np.zeros(n_wl, dtype=int)
-    for i_wl in range(n_wl):
-        i_ydeg = i_ydeg_best[i_wl]
-        ydeg = ydeg_range[i_ydeg]
-        I = I_cached[i_ydeg]
+def create_map(mode: str = "rotational", **kwargs) -> Map:
+    """User-friendly factory for rotational/eclipsed mapping.
 
-        mean = coeffs_means[i_ydeg][i_wl]
-        cov = coeffs_covs[i_ydeg][i_wl]
-        I_all_wl[i_wl] = I[:, 1:] @ mean.T + I[:, 0]  # adding the constant term back separately
-        I_cov_all_wl[i_wl] = I[:, 1:] @ cov @ I[:, 1:].T
-        ydeg_all_wl[i_wl] = ydeg
+    Examples
+    --------
+    Rotational:
+        create_map(mode="rotational", ydeg=5, inc=90, map_res=30)
 
-    return ydeg_all_wl, I_all_wl, I_cov_all_wl
+    Eclipse:
+        create_map(mode="eclipse", pri=pri, sec=sec, map_res=30)
+    """
+    return Map(mode=mode, **kwargs)
