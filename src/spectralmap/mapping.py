@@ -144,6 +144,7 @@ class Map:
             I_fit = I_full[self.observed_mask, 1:]
             I_constraint = I_fit @ img_Vt.T
             w_pix = solid_angle_weights(self.lat_flat, self.lon_flat)
+            w_pix = w_pix[self.observed_mask]
         else:
             I_constraint = None
             w_pix = None
@@ -258,6 +259,7 @@ class EclipseMap(Map):
         ydeg: int | None = None,
         pri: starry.Primary | None = None,
         sec: starry.Secondary | None = None,
+        eclipse_depth: float | None = None,
     ):
         if pri is None or sec is None:
             raise ValueError("mode='eclipse' requires both pri and sec.")
@@ -265,8 +267,10 @@ class EclipseMap(Map):
         self.inc = None
         self.pri = pri
         self.sec = sec
+        self.sec.map = starry.Map(ydeg=ydeg, map_res=map_res, inc=90) # currently default to edge-on for eclipse mapping
         self.sys = starry.System(pri, sec)
         self.map = self.sec.map
+        self.eclipse_depth = eclipse_depth
 
     @property
     def n_coeff(self) -> int:
@@ -322,15 +326,29 @@ class Maps:
         self.lon = None
         self.a_lambda = None
         self.b_lambda = None
+        self.eclipse_depth = None
+        self.maps = {}
+        self.data
 
         if self.mode == "eclipse" and (self.pri is None or self.sec is None):
             raise ValueError("EclipseMaps requires both pri and sec.")
 
     def _resolve_inc(self, data: LightCurveData) -> int | None:
         return data.inc if data.inc is not None else self.inc
+    
+    def get_map_for_ydeg(self, ydeg: int) -> Map:
+        if ydeg in self.maps:
+            return self.maps[ydeg]
+        if self.mode == "rotational":
+            map = RotMap(map_res=self.map_res, ydeg=ydeg, inc=self._resolve_inc(self.data))
+        else:
+            map = EclipseMap(map_res=self.map_res, ydeg=ydeg, pri=self.pri, sec=self.sec, eclipse_depth=self.eclipse_depth)
+        self.maps[ydeg] = map
+        return map
 
     def fit_ydegs_fix_lambda(self, data: LightCurveData, lambda_fix=None):
         """Fit maps across all ydeg values, returning evidence and coefficients for each wavelength."""
+        self.data = data
         inc = self._resolve_inc(data)
         if self.mode == "rotational" and inc == 90:
             ydegs = self.ydegs[self.ydegs % 2 == 0]
@@ -346,16 +364,7 @@ class Maps:
 
         for i_ydeg, ydeg in enumerate(ydegs):
             print(f"Fitting ydeg={ydeg}...")
-            if self.mode == "eclipse":
-                self.sec.map = starry.Map(ydeg=ydeg, map_res=self.map_res)
-            map_obj = make_map(
-                mode=self.mode,
-                map_res=self.map_res,
-                ydeg=ydeg,
-                inc=inc,
-                pri=self.pri,
-                sec=self.sec,
-            )
+            map_obj = self.get_map_for_ydeg(ydeg)
             mu_nwl = np.zeros((n_wl, map_obj.n_coeff))
             cov_nwl = np.zeros((n_wl, map_obj.n_coeff, map_obj.n_coeff))
 
@@ -429,12 +438,8 @@ class RotMaps(Maps):
         I_cached = []
         
         for ydeg in ydegs:
-            map_obj = make_map(
-                mode=self.mode,
-                map_res=self.map_res,
-                ydeg=ydeg,
-                inc=inc,
-            )
+            map_obj = self.get_map_for_ydeg(ydeg)
+
             I = map_obj.intensity_design_matrix(projection="moll")
             I_cached.append(I[:, :])
         self.moll_mask = map_obj.moll_mask
@@ -503,6 +508,8 @@ class EclipseMaps(Maps):
         verbose=True,
         pri: starry.Primary | None = None,
         sec: starry.Secondary | None = None,
+        eclipse_depth: float | None = None,
+        observed_mask: np.ndarray | None = None,
     ):
         super().__init__(
             ydegs=ydegs,
@@ -514,6 +521,7 @@ class EclipseMaps(Maps):
             mode="eclipse",
             inc=None,
         )
+        self.eclipse_depth = eclipse_depth
 
     def fit_ydegs_lambda(self, data: LightCurveData):
         """Fit maps across all ydeg values, returning evidence and coefficients for each wavelength."""
@@ -568,6 +576,7 @@ class EclipseMaps(Maps):
                 inc=inc,
                 pri=self.pri,
                 sec=self.sec,
+                eclipse_depth=self.eclipse_depth,
             )
             I = map_obj.intensity_design_matrix(projection="moll")
             I_cached.append(I[:, :])
@@ -639,64 +648,24 @@ class EclipseMaps(Maps):
         return w_all, I_all_wl, I_cov_all_wl
 
 
+def make_map(mode: str = "rotational", **kwargs) -> Map:
+    """Factory for rotational/eclipsed mapping classes."""
+    mode_norm = _normalize_mode(mode)
+    
+    if mode_norm == "rotational":
+        return RotMap(**kwargs)
+    elif mode_norm == "eclipse":
+        return EclipseMap(**kwargs)
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
 
 def make_maps(mode: str = "rotational", **kwargs) -> Maps:
     """Factory for rotational/eclipsed multi-wavelength mapping classes."""
-    if mode == "rotational":
-        return RotMaps(kwargs['ydegs'], map_res=kwargs.get('map_res', 30), lambdas=kwargs.get('lambdas'), verbose=kwargs.get('verbose', True), inc=kwargs.get('inc'))
-    elif mode == "eclipse":
-        return EclipseMaps(kwargs['ydegs'], map_res=kwargs.get('map_res', 30), lambdas=kwargs.get('lambdas'), verbose=kwargs.get('verbose', True), pri=kwargs.get('pri'), sec=kwargs.get('sec'))
-    else:
-        raise ValueError("mode must be one of {'rotational', 'eclipse'}")
-
-
-def make_map(mode: str = "rotational", **kwargs) -> Map:
-    """Factory for rotational/eclipsed mapping classes.
-
-    Examples
-    --------
-    Rotational:
-        make_map(mode="rotational", ydeg=5, inc=90, map_res=30)
-
-    Eclipse:
-        make_map(mode="eclipse", pri=pri, sec=sec, map_res=30)
-    """
-    if mode == "rotational":
-        return RotMap(kwargs.get('map_res', 30), ydeg=kwargs.get('ydeg'), inc=kwargs.get('inc'))
-    elif mode == "eclipse":
-        return EclipseMap(kwargs.get('map_res', 30), ydeg=kwargs.get('ydeg'), pri=kwargs.get('pri'), sec=kwargs.get('sec'))
-    else:
-        raise ValueError("mode must be one of {'rotational', 'eclipse'}")
+    mode_norm = _normalize_mode(mode)
     
-
-def best_ydeg_maps(
-    data: LightCurveData,
-    ydeg_min: int = 2,
-    ydeg_max: int = 10,
-    map_res: int = 30,
-    mode: str = "rotational",
-    lambdas: np.ndarray | float | None = None,
-    ydeg_log_prior: np.ndarray | None = None,
-    verbose: bool = True,
-    return_moll_mask: bool = False,
-    pri: starry.Primary | None = None,
-    sec: starry.Secondary | None = None,
-):
-    """Convenience wrapper around `Maps(...).best_ydeg_maps(data)`.
-
-    Returns MAP ydeg plus BMA mu/covariance maps.
-    """
-    ydegs = np.arange(ydeg_min, ydeg_max + 1)
-    maps = make_maps(
-        mode=mode,
-        ydegs=ydegs,
-        map_res=map_res,
-        lambdas=lambdas,
-        verbose=verbose,
-        pri=pri,
-        sec=sec,
-    )
-    ydeg_best, I_all_wl, I_cov_all_wl = maps.best_ydeg_maps(data, ydeg_log_prior=ydeg_log_prior)
-    if return_moll_mask:
-        return ydeg_best, I_all_wl, I_cov_all_wl, maps.moll_mask
-    return ydeg_best, I_all_wl, I_cov_all_wl
+    if mode_norm == "rotational":
+        return RotMaps(**kwargs)
+    elif mode_norm == "eclipse":
+        return EclipseMaps(**kwargs)
+    else:
+        raise ValueError(f"Unknown mode: {mode}")

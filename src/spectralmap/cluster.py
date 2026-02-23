@@ -141,6 +141,7 @@ def find_clusters(F_all_wl, F_cov_all_wl, n_neighbors=50, sensitivity=3.0):
     if np.any(assigned_mask):
         # Only look at points that were picked by at least one neighbor check
         relevant_dists = all_dists[assigned_mask]
+        
         # Re-assign based on strict minimum distance among the anchors
         labels[assigned_mask] = np.argmin(relevant_dists, axis=1)
 
