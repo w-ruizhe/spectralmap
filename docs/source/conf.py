@@ -33,6 +33,15 @@ extensions = [
     "nbsphinx",
 ]
 
+# Avoid importing heavy/fragile scientific runtime dependencies on RTD
+autodoc_mock_imports = [
+    "starry",
+    "theano",
+    "aesara_theano_fallback",
+    "exoplanet_core",
+    "pymc3",
+]
+
 templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 
