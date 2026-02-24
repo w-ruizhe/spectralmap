@@ -7,10 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import numpy as np
-<<<<<<< HEAD
 from tqdm.auto import tqdm
-=======
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
 
 import starry
 # starry.config.lazy = False  # disable lazy evaluation
@@ -40,16 +37,10 @@ class Map:
 
     mode: str = "base"
 
-<<<<<<< HEAD
     def __init__(self, map_res: int = 30, ydeg: int = 2):
         self.map_res = map_res
         self.ydeg = ydeg
         self.map = None
-=======
-    def __init__(self, map_res: int | None = 30, ydeg: int | None = None):
-        self.map_res = int(map_res) if map_res is not None else 30
-        self.ydeg = ydeg
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
         self.mu = None
         self.cov = None
         self.flux = None
@@ -61,7 +52,6 @@ class Map:
         self.intensity_design_matrix_ = None
         self.lat = None
         self.lon = None
-<<<<<<< HEAD
         self.lat_flat = None
         self.lon_flat = None
         self.moll_mask = None
@@ -70,12 +60,6 @@ class Map:
         self.observed_mask = None
         self.projection = None
         
-=======
-        self.moll_mask = None
-        self.moll_mask_flat = None
-        self.observed_mask = np.ones(self.map_res**2, dtype=bool)  # default to all pixels observed
-
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
     @property
     def n_coeff(self) -> int:
         return int(self.map.Ny)
@@ -104,7 +88,6 @@ class Map:
         return A
 
     def get_latlon_grid(self, projection: str = "rect"):
-<<<<<<< HEAD
         if projection != self.projection:
             lat, lon = self.map.get_latlon_grid(res=self.map_res, projection=projection)
             self.lat = self._eval_to_numpy(lat)
@@ -115,21 +98,10 @@ class Map:
             self.moll_mask_flat = self.moll_mask.flatten()
             self.projection = projection
             self.observed_mask = (self.lon_flat > self.observed_lon_range[0]) & (self.lon_flat < self.observed_lon_range[1]) if self.observed_lon_range is not None else np.ones_like(self.lon_flat, dtype=bool)
-=======
-        lat, lon = self.map.get_latlon_grid(res=self.map_res, projection=projection)
-        self.lat = self._eval_to_numpy(lat)
-        self.lon = self._eval_to_numpy(lon)
-        self.lat_flat = self.lat.flatten()
-        self.lon_flat = self.lon.flatten()
-        self.moll_mask = np.isfinite(self.lat) & np.isfinite(self.lon)
-        self.moll_mask_flat = self.moll_mask.flatten()
-        self.projection = projection
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
         return self.lat, self.lon
 
     def intensity_design_matrix(self, projection: str = "rect") -> np.ndarray:
         """Compute intensity design matrix for given lat/lon grid."""
-<<<<<<< HEAD
         self.get_latlon_grid(projection=projection)
         mask = self.moll_mask_flat
         I = self._intensity_design_matrix_impl(self.lat_flat[mask], self.lon_flat[mask])
@@ -137,14 +109,6 @@ class Map:
         I = I[self.observed_mask[mask], :]
         self.intensity_design_matrix_ = I
         
-=======
-        lat, lon = self.get_latlon_grid(projection=projection)
-        self.lat, self.lon = lat, lon
-        mask = self.moll_mask_flat
-        I = self._intensity_design_matrix_impl(self.lat_flat[mask], self.lon_flat[mask])
-        I = self._eval_to_numpy(I)
-        self.intensity_design_matrix_ = I
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
         return I
 
     def solve_posterior(
@@ -183,7 +147,6 @@ class Map:
         y_fit = y - A_full[:, 0]
         if lambda_enabled:
             if self.intensity_design_matrix_ is None:
-<<<<<<< HEAD
                 I_full = self.intensity_design_matrix(projection="rect")
             else:
                 I_full = self.intensity_design_matrix_
@@ -191,15 +154,6 @@ class Map:
             I_fit = I_full[:, 1:]
             I_constraint = I_fit @ img_Vt.T
             w_pix = solid_angle_weights(self.lat_flat, self.lon_flat)[self.observed_mask]
-=======
-                 I_full = self.intensity_design_matrix(projection="rect")
-            else:
-                I_full = self.intensity_design_matrix_
-            I_fit = I_full[self.observed_mask, 1:]
-            I_constraint = I_fit @ img_Vt.T
-            w_pix = solid_angle_weights(self.lat_flat, self.lon_flat)
-            w_pix = w_pix[self.observed_mask]
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
         else:
             I_constraint = None
             w_pix = None
@@ -239,15 +193,6 @@ class Map:
             "log_ev": float(log_ev),
             "log_ev_marginalized": float(log_ev_marginalized),
         }
-<<<<<<< HEAD
-=======
-        if verbose:
-            print(
-                f"Optimized hyperparameters: {alpha_h}, beta={beta_out if beta_out is not None else 'uncertainties provided'}, "
-                f"lambda_fix={lambda_fix if lambda_fix else 'disabled'}, log_ev={log_ev}, "
-                f"log_ev_marginalized={log_ev_marginalized}"
-            )
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
 
         self.mu = mu
         self.cov = cov
@@ -287,7 +232,6 @@ class RotMap(Map):
 
     mode = "rotational"
 
-<<<<<<< HEAD
     def __init__(
         self,
         map_res: int | None = 30,
@@ -295,18 +239,12 @@ class RotMap(Map):
         inc: int | None = None,
         observed_mask: np.ndarray | None = None,
     ):
-=======
-    def __init__(self, map_res: int | None = 30, ydeg: int | None = None, inc: int | None = None):
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
         if ydeg is None:
             ydeg = 5
         super().__init__(map_res=map_res, ydeg=ydeg)
         self.inc = inc
         self.map = starry.Map(ydeg=ydeg, inc=inc)
-<<<<<<< HEAD
         self.observed_mask = observed_mask
-=======
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
 
     def _design_matrix_impl(self, theta: np.ndarray) -> np.ndarray:
         return self.map.design_matrix(theta=theta)
@@ -332,28 +270,18 @@ class EclipseMap(Map):
         pri: starry.Primary | None = None,
         sec: starry.Secondary | None = None,
         eclipse_depth: float | None = None,
-<<<<<<< HEAD
         observed_lon_range: np.ndarray | None = None,
-=======
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
     ):
         if pri is None or sec is None:
             raise ValueError("mode='eclipse' requires both pri and sec.")
         super().__init__(map_res=map_res, ydeg=ydeg)
-<<<<<<< HEAD
-=======
-        self.inc = None
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
         self.pri = pri
         self.sec = sec
         self.sec.map = starry.Map(ydeg=ydeg, map_res=map_res, inc=90) # currently default to edge-on for eclipse mapping
         self.sys = starry.System(pri, sec)
         self.map = self.sec.map
         self.eclipse_depth = eclipse_depth
-<<<<<<< HEAD
         self.observed_lon_range = observed_lon_range
-=======
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
 
     @property
     def n_coeff(self) -> int:
@@ -387,13 +315,7 @@ class Maps:
         lambdas: np.ndarray | float | None = None,
         mode: str | None = None,
         map_res: int = 30,
-<<<<<<< HEAD
         observed_lon_range: np.ndarray | None = None,
-=======
-        pri: starry.Primary | None = None,
-        sec: starry.Secondary | None = None,
-        inc: int | None = None,
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
         verbose=True,
     ):
         mode_norm = self.mode if mode is None else _normalize_mode(mode)
@@ -404,7 +326,6 @@ class Maps:
         self.map_res = map_res
         self.lambdas = lambdas
         self.verbose = verbose
-<<<<<<< HEAD
         self.observed_lon_range = observed_lon_range
         self.inc = None
         self.data = None
@@ -479,36 +400,6 @@ class Maps:
         cov_bma = second_moment - np.outer(mu_bma, mu_bma)
         cov_bma = 0.5 * (cov_bma + cov_bma.T)
         return mu_bma, cov_bma
-=======
-        self.pri = pri
-        self.sec = sec
-        self.inc = inc
-        self.mask = None
-        self.mask_flat = None
-        self.lat = None
-        self.lon = None
-        self.a_lambda = None
-        self.b_lambda = None
-        self.eclipse_depth = None
-        self.maps = {}
-        self.data
-
-        if self.mode == "eclipse" and (self.pri is None or self.sec is None):
-            raise ValueError("EclipseMaps requires both pri and sec.")
-
-    def _resolve_inc(self, data: LightCurveData) -> int | None:
-        return data.inc if data.inc is not None else self.inc
-    
-    def get_map_for_ydeg(self, ydeg: int) -> Map:
-        if ydeg in self.maps:
-            return self.maps[ydeg]
-        if self.mode == "rotational":
-            map = RotMap(map_res=self.map_res, ydeg=ydeg, inc=self._resolve_inc(self.data))
-        else:
-            map = EclipseMap(map_res=self.map_res, ydeg=ydeg, pri=self.pri, sec=self.sec, eclipse_depth=self.eclipse_depth)
-        self.maps[ydeg] = map
-        return map
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
 
     def fit_ydegs_fix_lambda(self, data: LightCurveData, lambda_fix=None):
         """Fit maps across all ydeg values, returning evidence and coefficients for each wavelength."""
@@ -525,26 +416,17 @@ class Maps:
         coeffs_mus = []
         coeffs_covs = []
 
-<<<<<<< HEAD
         ydeg_iter = tqdm(ydegs, desc="ydeg", disable=not self.verbose, dynamic_ncols=True)
         for i_ydeg, ydeg in enumerate(ydeg_iter):
-=======
-        for i_ydeg, ydeg in enumerate(ydegs):
-            print(f"Fitting ydeg={ydeg}...")
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
             map_obj = self.get_map_for_ydeg(ydeg)
             mu_nwl = np.zeros((n_wl, map_obj.n_coeff))
             cov_nwl = np.zeros((n_wl, map_obj.n_coeff, map_obj.n_coeff))
 
             for i_wl in range(n_wl):
-<<<<<<< HEAD
                 if self.verbose:
                     step = max(1, n_wl // 10)
                     if (i_wl == 0) or ((i_wl + 1) % step == 0) or (i_wl + 1 == n_wl):
                         ydeg_iter.set_postfix_str(f"wl {i_wl + 1}/{n_wl}")
-=======
-                print(f"  Wavelength {i_wl+1}/{n_wl}...")
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
                 y = data.flux[i_wl]
                 sigma_y = data.flux_err[i_wl] if data.flux_err is not None else None
                 mu, cov, log_ev_marginalized = map_obj.solve_posterior(
@@ -561,7 +443,6 @@ class Maps:
             coeffs_mus.append(np.array(mu_nwl))
             coeffs_covs.append(np.array(cov_nwl))
 
-<<<<<<< HEAD
         if self.verbose:
             ydeg_iter.set_postfix_str("")
 
@@ -573,8 +454,6 @@ class Maps:
             )
             print(f"lambda={lambda_fix}: Best-evidence wavelength counts by ydeg: {ydeg_count_text}")
 
-=======
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
         return ydegs, log_evs, coeffs_mus, coeffs_covs
     
 
@@ -582,7 +461,6 @@ class Maps:
 
 class RotMaps(Maps):
     """Rotational multi-wavelength mapping utilities."""
-<<<<<<< HEAD
 
     mode = "rotational"
 
@@ -632,59 +510,6 @@ class RotMaps(Maps):
         log_prior = np.zeros(n_ydeg, dtype=float) # set uniform prior over ydeg for now
 
         I_cached = self._cache_intensity_design_matrices(ydegs, data, projection="moll")
-=======
-
-    mode = "rotational"
-
-    def __init__(
-        self,
-        ydegs: np.ndarray,
-        map_res=30,
-        lambdas: float | None = None,
-        verbose=True,
-        inc: int | None = None,
-    ):
-        super().__init__(
-            ydegs=ydegs,
-            map_res=map_res,
-            lambdas=lambdas,
-            verbose=verbose,
-            mode="rotational",
-            inc=inc,
-        )
-
-    def marginalized_maps(self, data: LightCurveData):
-        """Bayesian model average over ydeg for each wavelength.
-
-        Returns
-        -------
-        w_all : np.ndarray
-            BMA weights over (lambda, ydeg) for each wavelength.
-        I_all_wl : np.ndarray
-            BMA mu intensity map per wavelength.
-        I_cov_all_wl : np.ndarray
-            BMA covariance per wavelength (within-model + between-model variance).
-        """
-        ydegs, log_evs_all, coeffs_mus_all, coeffs_covs_all = self.fit_ydegs_fix_lambda(data)
-        n_ydeg, n_wl = log_evs_all.shape
-
-        log_prior = np.zeros(n_ydeg, dtype=float) # set uniform prior over ydeg for now
-
-        inc = self._resolve_inc(data)
-        I_cached = []
-        
-        for ydeg in ydegs:
-            map_obj = self.get_map_for_ydeg(ydeg)
-
-            I = map_obj.intensity_design_matrix(projection="moll")
-            I_cached.append(I[:, :])
-        self.moll_mask = map_obj.moll_mask
-        self.moll_mask_flat = map_obj.moll_mask_flat
-        self.lat = map_obj.lat
-        self.lon = map_obj.lon
-        self.lat_flat = map_obj.lat_flat
-        self.lon_flat = map_obj.lon_flat
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
         n_pix = I_cached[0].shape[0]
 
         I_all_wl = np.zeros((n_wl, n_pix))
@@ -704,7 +529,6 @@ class RotMaps(Maps):
 
             w_all[:, i_wl] = weights
 
-<<<<<<< HEAD
             def get_components(model_idx):
                 i_ydeg = model_idx[0]
                 return (
@@ -861,181 +685,6 @@ class EclipseMaps(Maps):
                 )
 
             mu_bma, cov_bma = self._accumulate_bma_moments(weights, n_pix, get_components)
-=======
-            mu_bma = np.zeros(n_pix)
-            second_moment = np.zeros((n_pix, n_pix))
-            
-            for i_ydeg in range(n_ydeg):
-                weight = weights[i_ydeg]
-                if weight == 0:
-                    continue
-
-                I_use = I_cached[i_ydeg]         # (n_pix, k)
-                mu = coeffs_mus_all[i_ydeg][i_wl]   # (k,)
-                cov  = coeffs_covs_all[i_ydeg][i_wl]    # (k,k)
-
-                I_mu = I_use @ mu              # (n_pix,)
-                I_cov = I_use @ cov @ I_use.T    # (n_pix,n_pix)
-
-                mu_bma += weight * I_mu
-                second_moment += weight * (I_cov + np.outer(I_mu, I_mu))
-
-            cov_bma = second_moment - np.outer(mu_bma, mu_bma)
-            cov_bma = 0.5 * (cov_bma + cov_bma.T)
-
-            I_all_wl[i_wl] = mu_bma
-            I_cov_all_wl[i_wl] = cov_bma
-
-
-        return w_all, I_all_wl, I_cov_all_wl
-
-
-class EclipseMaps(Maps):
-    """Eclipse multi-wavelength mapping utilities."""
-
-    mode = "eclipse"
-
-    def __init__(
-        self,
-        ydegs: np.ndarray,
-        map_res=30,
-        lambdas: float | None = None,
-        verbose=True,
-        pri: starry.Primary | None = None,
-        sec: starry.Secondary | None = None,
-        eclipse_depth: float | None = None,
-        observed_mask: np.ndarray | None = None,
-    ):
-        super().__init__(
-            ydegs=ydegs,
-            map_res=map_res,
-            lambdas=lambdas,
-            verbose=verbose,
-            pri=pri,
-            sec=sec,
-            mode="eclipse",
-            inc=None,
-        )
-        self.eclipse_depth = eclipse_depth
-
-    def fit_ydegs_lambda(self, data: LightCurveData):
-        """Fit maps across all ydeg values, returning evidence and coefficients for each wavelength."""
-
-        log_evs_all = []
-        coeffs_mus_all = []
-        coeffs_covs_all = []
-        
-        for lambda_fix in self.lambdas:
-            if self.verbose:
-                print(f"Fitting with lambda={lambda_fix}...")
-            ydegs, log_evs, coeffs_mus, coeffs_covs = self.fit_ydegs_fix_lambda(data, lambda_fix=lambda_fix)
-            if self.verbose:
-                print(f"Completed fitting for lambda={lambda_fix}.")
-            log_evs_all.append(log_evs)
-            coeffs_mus_all.append(coeffs_mus)
-            coeffs_covs_all.append(coeffs_covs)
-        log_evs_all = np.array(log_evs_all) # shape (n_lambda, n_ydeg, n_wl)
-        coeffs_mus_all = coeffs_mus_all # shape (n_lambda, n_ydeg, n_wl, n_coeff)
-        coeffs_covs_all = coeffs_covs_all # shape (n_lambda, n_ydeg, n_wl, n_coeff, n_coeff)
-
-        return ydegs, log_evs_all, coeffs_mus_all, coeffs_covs_all
-    
-
-    def marginalized_maps(self, data: LightCurveData):
-        """Bayesian model average over ydeg and lambda for each wavelength.
-
-        Returns
-        -------
-        ydeg_all_wl : np.ndarray
-            MAP ydeg per wavelength (representative model).
-        I_all_wl : np.ndarray
-            BMA mu intensity map per wavelength.
-        I_cov_all_wl : np.ndarray
-            BMA covariance per wavelength (within-model + between-model variance).
-        """
-        ydegs, log_evs_all, coeffs_mus_all, coeffs_covs_all = self.fit_ydegs_lambda(data)
-        n_lambda, n_ydeg, n_wl = log_evs_all.shape
-
-        log_prior = np.zeros(n_ydeg, dtype=float) # set uniform prior over ydeg for now
-
-        inc = self._resolve_inc(data)
-        I_cached = []
-        
-        for ydeg in ydegs:
-            if self.mode == "eclipse":
-                self.sec.map = starry.Map(ydeg=ydeg, map_res=self.map_res)
-            map_obj = make_map(
-                mode=self.mode,
-                map_res=self.map_res,
-                ydeg=ydeg,
-                inc=inc,
-                pri=self.pri,
-                sec=self.sec,
-                eclipse_depth=self.eclipse_depth,
-            )
-            I = map_obj.intensity_design_matrix(projection="moll")
-            I_cached.append(I[:, :])
-        self.moll_mask = map_obj.moll_mask
-        self.moll_mask_flat = map_obj.moll_mask_flat
-        self.lat = map_obj.lat
-        self.lon = map_obj.lon
-        self.lat_flat = map_obj.lat_flat
-        self.lon_flat = map_obj.lon_flat
-        n_pix = I_cached[0].shape[0]
-
-        I_all_wl = np.zeros((n_wl, n_pix))
-        I_cov_all_wl = np.zeros((n_wl, n_pix, n_pix))
-
-
-        log_post = log_evs_all + log_prior[np.newaxis, :, np.newaxis] # shape (n_lambda, n_ydeg, n_wl)
-        log_post = log_post + gamma_log_prior_lambda(self.lambdas[:, np.newaxis, np.newaxis], self.a_lambda, self.b_lambda) + log_delta_lambda(self.lambdas)[:, np.newaxis, np.newaxis] # add log prior over lambda
-        
-        rejected_mask = np.zeros_like(log_post, dtype=bool)
-        for i_ydeg in range(n_ydeg):
-            for i_lambda in range(n_lambda):
-                for i_wl in range(n_wl):
-                    I_mu = I_cached[i_ydeg] @ coeffs_mus_all[i_lambda][i_ydeg][i_wl] # shape (n_pix)
-                    I_sigma = np.sqrt(np.diag(I_cached[i_ydeg] @ coeffs_covs_all[i_lambda][i_ydeg][i_wl] @ I_cached[i_ydeg].T)) # shape (n_pix)
-                    if np.any(I_mu - I_sigma < 0):
-                        rejected_mask[i_lambda, i_ydeg, i_wl] = True
-
-        if np.sum(~rejected_mask) == 0:
-            raise RuntimeError("All models were rejected based on negative intensity. Consider adjusting the log prior over lambda or inspecting the fitted maps for issues.")
-        
-        w_all = np.zeros_like(log_post)
-        for i_wl in range(n_wl):
-            # weights over (lambda, ydeg) FOR THIS WAVELENGTH
-            logw = log_post[:, :, i_wl]              # (n_lambda, n_ydeg)
-            m = np.max(logw)
-            weights = np.exp(logw - m)
-            weights[rejected_mask[:, :, i_wl]] = 0.0
-            w_sum = np.sum(weights)
-            weights /= w_sum                           # normalize
-
-            w_all[:, :, i_wl] = weights
-
-            mu_bma = np.zeros(n_pix)
-            second_moment = np.zeros((n_pix, n_pix))
-
-            for i_lambda in range(n_lambda):
-                for i_ydeg in range(n_ydeg):
-                    weight = weights[i_lambda, i_ydeg]
-                    if weight == 0:
-                        continue
-
-                    I_use = I_cached[i_ydeg]         # (n_pix, k)
-                    mu = coeffs_mus_all[i_lambda][i_ydeg][i_wl]   # (k,)
-                    cov  = coeffs_covs_all[i_lambda][i_ydeg][i_wl]    # (k,k)
-
-                    mu_j = I_use @ mu              # (n_pix,)
-                    cov_j = I_use @ cov @ I_use.T    # (n_pix,n_pix)
-
-                    mu_bma += weight * mu_j
-                    second_moment += weight * (cov_j + np.outer(mu_j, mu_j))
-
-            cov_bma = second_moment - np.outer(mu_bma, mu_bma)
-            cov_bma = 0.5 * (cov_bma + cov_bma.T)
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
 
             I_all_wl[i_wl] = mu_bma
             I_cov_all_wl[i_wl] = cov_bma

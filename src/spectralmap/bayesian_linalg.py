@@ -61,10 +61,6 @@ def linear_solve(
             ITI = Iw.T @ Iw
 
         H = H + lambda_fix * ITI
-<<<<<<< HEAD
-=======
-        rhs = rhs
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
 
     H_stabilized = H + np.eye(k) * jitter
 
@@ -115,12 +111,6 @@ def optimize_hyperparameters(
         fix_beta = True
         log_prod_sigma = np.sum(np.log(sigma_y))
     else:
-<<<<<<< HEAD
-=======
-        A = A
-        y = y
-
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
         resid_init = y - np.mean(y)
         var_init = np.var(resid_init) if N > 1 else 1.0
         beta = 1.0 / (var_init + 1e-9)

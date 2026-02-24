@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 from __future__ import annotations
 
 import numpy as np
@@ -183,13 +182,6 @@ def bin_flux_by_theta(
         flux_err_binned = flux_err_binned_flat.reshape(lead_shape + (n_bins,))
 
     return centers, flux_binned, flux_err_binned, counts
-=======
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.ndimage import distance_transform_edt
-
-from scipy import constants
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
 
 def intensity_to_temperature(intensity: np.ndarray, wavelength: np.ndarray) -> np.ndarray:
     """
@@ -250,92 +242,6 @@ def expand_moll_values(values: np.ndarray, moll_mask: np.ndarray, fill_value=np.
     return out
 
 
-<<<<<<< HEAD
-=======
-def plot_mollweide_projection(
-    values_by_wavelength,
-    moll_mask,
-    map_res=None,
-    cbar_label="Flux density",
-    cmap="inferno",
-    levels=200,
-    smooth_boundary=True,
-    hide_ticks=True,
-    show_grid=True,
-    ax=None,
-):
-    """Plot a starry-like Mollweide map from masked pixel values.
-
-    Parameters
-    ----------
-    values_by_wavelength : ndarray
-        Array shaped (n_wavelength, n_valid_pixels).
-    moll_mask : ndarray
-        Boolean mask of full map footprint (flat or map_res x map_res).
-    map_res : int, optional
-        Map resolution. If None, inferred from moll_mask.
-    cbar_label : str, optional
-        Colorbar label.
-    cmap : str, optional
-        Matplotlib colormap name.
-    levels : int, optional
-        Number of contour levels.
-    smooth_boundary : bool, optional
-        If True, fills NaNs near footprint edge with nearest valid value.
-    hide_ticks : bool, optional
-        If True, hides x/y tick labels.
-    show_grid : bool, optional
-        If True, draws projected grid.
-    ax : matplotlib axis, optional
-        Existing Mollweide axis.
-
-    Returns
-    -------
-    fig, ax, pcm, cb
-        Figure, axis, contour set, and colorbar.
-    """
-    if map_res is None:
-        if np.asarray(moll_mask).ndim == 2:
-            map_res = int(np.asarray(moll_mask).shape[0])
-        else:
-            map_res = int(np.sqrt(np.asarray(moll_mask).size))
-
-    full = expand_moll_values(values_by_wavelength, moll_mask)
-    img = full.reshape(map_res, map_res)
-
-    lon = np.linspace(-np.pi, np.pi, map_res)
-    lat = np.linspace(-0.5 * np.pi, 0.5 * np.pi, map_res)
-    lon2d, lat2d = np.meshgrid(lon, lat)
-
-    if smooth_boundary:
-        img_plot = img.copy()
-        valid = np.isfinite(img_plot)
-        nearest_idx = distance_transform_edt(~valid, return_distances=False, return_indices=True)
-        img_plot[~valid] = img_plot[tuple(nearest_idx[:, ~valid])]
-    else:
-        img_plot = np.ma.masked_invalid(img)
-
-    if ax is None:
-        fig = plt.figure(figsize=(8, 4.5))
-        ax = fig.add_subplot(111, projection="mollweide")
-    else:
-        fig = ax.figure
-
-    pcm = ax.contourf(lon2d, lat2d, img_plot, levels=levels, cmap=cmap)
-
-    if show_grid:
-        ax.grid(True, alpha=0.3)
-
-    cb = fig.colorbar(pcm, ax=ax, pad=0.08)
-    cb.set_label(cbar_label)
-
-    if hide_ticks:
-        ax.set_xticklabels([])
-        ax.set_yticklabels([])
-
-    return fig, ax, pcm, cb
-
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
 def logsumexp(logw):
     m = np.max(logw)
     return m + np.log(np.sum(np.exp(logw - m)))
@@ -397,7 +303,6 @@ def log_delta_lambda(lambdas):
     d[1:-1] = 0.5 * (lambdas[2:] - lambdas[:-2])   # centered widths
     d[0]    = lambdas[1] - lambdas[0]              # edge widths
     d[-1]   = lambdas[-1] - lambdas[-2]
-<<<<<<< HEAD
     return np.log(d)
 
 
@@ -490,6 +395,3 @@ def plot_mollweide_labels(
     cb.outline.set_edgecolor('black')
 
     return fig, ax, pcm, cb
-=======
-    return np.log(d)
->>>>>>> 2502033ec197f3286777e1035f40b198689b61fc
