@@ -12,7 +12,7 @@ def count_points_in_triangle(A, B, C, all_points):
     mask = triangle_poly.contains_points(all_points, radius=1e-30)
     return np.sum(mask)
 
-def get_best_polygon_by_points(points, min_corners=3, sensitivity=5.0):
+def get_best_polygon_by_points(points, min_corners=3, sensitivity=3.0):
     hull = ConvexHull(points)
     poly_indices = list(hull.vertices)
     history = []
@@ -89,7 +89,7 @@ def get_best_polygon_by_points(points, min_corners=3, sensitivity=5.0):
     return best_indices
 
 
-def find_clusters(F_all_wl, F_cov_all_wl, n_neighbors=50):
+def find_clusters(F_all_wl, F_cov_all_wl, n_neighbors=50, sensitivity=3.0):
     """ F_all_wl: (n_wl, n_grid) """
     # --- 2. CONFIGURATION & SORTING ---
     X = F_all_wl.T
@@ -97,7 +97,7 @@ def find_clusters(F_all_wl, F_cov_all_wl, n_neighbors=50):
     pca = PCA(n_components=2)
     W = pca.fit_transform(log_X)
 
-    corner_indices = get_best_polygon_by_points(W, min_corners=3, sensitivity=5)
+    corner_indices = get_best_polygon_by_points(W, min_corners=3, sensitivity=sensitivity)
     corner_coords = W[corner_indices]
     # Sort by Angle
     centroid = np.mean(corner_coords, axis=0)
@@ -141,15 +141,11 @@ def find_clusters(F_all_wl, F_cov_all_wl, n_neighbors=50):
     if np.any(assigned_mask):
         # Only look at points that were picked by at least one neighbor check
         relevant_dists = all_dists[assigned_mask]
+        
         # Re-assign based on strict minimum distance among the anchors
         labels[assigned_mask] = np.argmin(relevant_dists, axis=1)
 
-    # 1. Plot UNASSIGNED points (Grey, faint)
-    mask_unassigned = labels == -1
     # X: (N, D), C: (K, D)
-    F_regionals = None
-    F_regional_errs = None
-    F_regional_covs = None
     V = np.zeros((np.unique(labels).size, X.shape[0])) # (n_clusters, n_spatial_points)
 
     for i, label in enumerate(np.unique(labels)):
