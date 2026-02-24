@@ -6,4 +6,3 @@ API
    :recursive:
 
    spectralmap
-   spectralmap.mapping

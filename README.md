@@ -11,11 +11,17 @@ git clone <https://github.com/w-ruizhe/spectralmap.git>
 cd spectralmap
 
 # Create a virtual environment (ensure python is 3.9)
-python3.9 -m venv .venv
-source .venv/bin/activate
+conda create -n spectralmap
+conda activate spectralmap
 
-# Install in editable mode with dev & docs dependencies
-pip install -e ".[dev,docs]"
+# Install for users
+pip install .
+
+# Or
+pip install spectralmap
+
+# Optional: editable install with dev & docs dependencies
+# pip install -e ".[dev,docs]"
 
 # Run tests
 pytest

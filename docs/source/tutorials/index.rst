@@ -6,5 +6,5 @@ Tutorials
 
    SIMP_0136
    Luhman_16B
-   05_mathematical_framework
-   06_pca_on_surface_spectra
+   mathematical_framework
+   pca_on_surface_spectra

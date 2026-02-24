@@ -1,18 +1,24 @@
 Installation
 ============
 
-Editable install (recommended for development)
-----------------------------------------------
+Install from source (recommended for users)
+-------------------------------------------
+
+.. code-block:: bash
+
+   git clone https://github.com/w-ruizhe/spectralmap.git
+   cd spectralmap
+   pip install .
+
+or
+
+.. code-block:: bash
+
+   pip install spectralmap
+
+Development install (optional)
+------------------------------
 
 .. code-block:: bash
 
    pip install -e ".[dev,docs]"
-
-Optional: using `starry`
-------------------------
-
-If you want to use `starry` for spherical-harmonic maps and analytic light curves:
-
-.. code-block:: bash
-
-   pip install starry
