@@ -20,6 +20,4 @@ docs/source/api/generated/
 .idea/
 
 # Large data files
-docs/source/tutorials/W1049B_NIRSpec_processed.npz
-docs/source/tutorials/SIMP0136_NIRSpec.npz
-docs/source/tutorials/Luhman16b_NIRSpec.npz
+docs/source/tutorials/data/
