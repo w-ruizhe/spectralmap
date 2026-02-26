@@ -7,7 +7,7 @@ from matplotlib.patches import Patch
 from scipy.ndimage import zoom, distance_transform_edt
 from matplotlib import colors as mcolors
 
-def plot_mollweide_rgb_perfect_edges(pc1_scores, pc2_scores, mask_2d, upsample=4):
+def plot_mollweide_rgb_perfect_edges(pc1_scores, pc2_scores, mask_2d, upsample=4, extrapolate=True):
     mask_2d = np.asarray(mask_2d, dtype=bool)
     H, W = mask_2d.shape
     
@@ -32,13 +32,14 @@ def plot_mollweide_rgb_perfect_edges(pc1_scores, pc2_scores, mask_2d, upsample=4
     
     # --- 3. Extrapolate colors to fill the ENTIRE rectangle ---
     # We flood the empty space with the nearest valid colors.
-    invalid = ~mask_2d
-    if np.any(invalid):
-        # Finds the row/col indices of the nearest valid pixel (where invalid == 0)
-        nearest_idx = distance_transform_edt(invalid, return_distances=False, return_indices=True)
-        R[invalid] = R[nearest_idx[0, invalid], nearest_idx[1, invalid]]
-        G[invalid] = G[nearest_idx[0, invalid], nearest_idx[1, invalid]]
-        B[invalid] = B[nearest_idx[0, invalid], nearest_idx[1, invalid]]
+    if extrapolate:
+        invalid = ~mask_2d
+        if np.any(invalid):
+            # Finds the row/col indices of the nearest valid pixel (where invalid == 0)
+            nearest_idx = distance_transform_edt(invalid, return_distances=False, return_indices=True)
+            R[invalid] = R[nearest_idx[0, invalid], nearest_idx[1, invalid]]
+            G[invalid] = G[nearest_idx[0, invalid], nearest_idx[1, invalid]]
+            B[invalid] = B[nearest_idx[0, invalid], nearest_idx[1, invalid]]
 
     # --- 4. Smooth the filled color channels ---
     # order=3 is bicubic (smoother than bilinear). Clip to keep RGB in bounds.
@@ -289,7 +290,6 @@ def solid_angle_weights(lat, lon):
     lat_hi = np.clip(lat_r + 0.5 * dlat, -0.5 * np.pi, 0.5 * np.pi)
     w_pix = dlon * (np.sin(lat_hi) - np.sin(lat_lo))
     w_pix = np.maximum(w_pix, 0.0)
-
     return w_pix
 
 def log_delta_lambda(lambdas):
@@ -315,6 +315,7 @@ def plot_mollweide_labels(
     ax=None,
     show_grid=True,
     hide_ticks=True,
+    extrapolate=True
 ):
     moll_mask = np.asarray(moll_mask, dtype=bool)
     if map_res is None:
@@ -358,10 +359,11 @@ def plot_mollweide_labels(
     else:
         norm = mcolors.BoundaryNorm(bounds, len(cmap.colors))
 
-    # Mask outside footprint: keep it transparent (no smearing)
+    # Mask outside footprint
     nearest_idx = distance_transform_edt(~finite, return_distances=False, return_indices=True)
     filled = img.copy()
-    filled[~finite] = filled[tuple(nearest_idx[:, ~finite])]
+    if extrapolate:
+        filled[~finite] = filled[tuple(nearest_idx[:, ~finite])]
     
     pcm = ax.pcolormesh(
         lon2d, lat2d, filled,

@@ -153,7 +153,7 @@ class Map:
 
             I_fit = I_full[:, 1:]
             I_constraint = I_fit @ img_Vt.T
-            w_pix = solid_angle_weights(self.lat_flat, self.lon_flat)[self.observed_mask]
+            w_pix = solid_angle_weights(self.lat_flat[self.observed_mask], self.lon_flat[self.observed_mask])
         else:
             I_constraint = None
             w_pix = None
@@ -659,7 +659,7 @@ class EclipseMaps(Maps):
                 for i_wl in range(n_wl):
                     I_mu = I_cached[i_ydeg] @ coeffs_mus_all[i_lambda][i_ydeg][i_wl] # shape (n_pix)
                     I_sigma = np.sqrt(np.diag(I_cached[i_ydeg] @ coeffs_covs_all[i_lambda][i_ydeg][i_wl] @ I_cached[i_ydeg].T)) # shape (n_pix)
-                    if np.any(I_mu < -5e-5): # looser criterion to avoid rejecting models with small negatives
+                    if np.any(I_mu + 0.1*I_sigma < 0): # looser criterion to avoid rejecting models with small negatives
                         rejected_mask[i_lambda, i_ydeg, i_wl] = True
         
         w_all = np.zeros_like(log_post)
