@@ -20,8 +20,45 @@ class LightCurveData:
     theta: np.ndarray
     flux: np.ndarray
     flux_err: np.ndarray | None = None
-    wavelength: np.ndarray | None = None
+    wl: np.ndarray | None = None
     inc: int | None = None
+
+    def __post_init__(self):
+        self.theta = np.asarray(self.theta)
+        self.flux = np.asarray(self.flux)
+
+        if self.theta.ndim != 1:
+            raise ValueError("theta must be a 1D array")
+
+        if self.flux.ndim == 1:
+            self.flux = self.flux[np.newaxis, :]
+        elif self.flux.ndim != 2:
+            raise ValueError("flux must be a 1D or 2D array")
+
+        if self.flux.shape[1] != self.theta.size:
+            raise ValueError(
+                "flux must have shape (n_wl, n_time) with n_time == len(theta)"
+            )
+
+        if self.flux_err is not None:
+            self.flux_err = np.asarray(self.flux_err)
+            if self.flux_err.ndim == 1:
+                self.flux_err = self.flux_err[np.newaxis, :]
+            elif self.flux_err.ndim != 2:
+                raise ValueError("flux_err must be a 1D or 2D array")
+
+            if self.flux_err.shape != self.flux.shape:
+                raise ValueError("flux_err must have the same shape as flux")
+
+        if self.wl is not None:
+            self.wl = np.asarray(self.wl)
+            if self.wl.ndim == 0:
+                self.wl = self.wl[np.newaxis]
+            elif self.wl.ndim != 1:
+                raise ValueError("wl must be a 1D array")
+
+            if self.wl.size != self.flux.shape[0]:
+                raise ValueError("wl must have length n_wl")
 
 def _normalize_mode(mode: str | None) -> str:
     mode_norm = str(mode or "rotational").lower()
@@ -626,7 +663,7 @@ class EclipseMaps(Maps):
         return ydegs, log_evs_all, coeffs_mus_all, coeffs_covs_all
     
 
-    def marginalized_maps(self, data: LightCurveData):
+    def marginalized_maps(self, data: LightCurveData, sigma_threshold=0.1):
         """Bayesian model average over ydeg and lambda for each wavelength.
 
         Returns
@@ -659,7 +696,7 @@ class EclipseMaps(Maps):
                 for i_wl in range(n_wl):
                     I_mu = I_cached[i_ydeg] @ coeffs_mus_all[i_lambda][i_ydeg][i_wl] # shape (n_pix)
                     I_sigma = np.sqrt(np.diag(I_cached[i_ydeg] @ coeffs_covs_all[i_lambda][i_ydeg][i_wl] @ I_cached[i_ydeg].T)) # shape (n_pix)
-                    if np.any(I_mu + 0.1*I_sigma < 0): # looser criterion to avoid rejecting models with small negatives
+                    if np.any(I_mu + sigma_threshold*I_sigma < 0): # looser criterion to avoid rejecting models with small negatives
                         rejected_mask[i_lambda, i_ydeg, i_wl] = True
         
         w_all = np.zeros_like(log_post)

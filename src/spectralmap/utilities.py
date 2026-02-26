@@ -216,6 +216,258 @@ def intensity_to_temperature(intensity: np.ndarray, wavelength: np.ndarray) -> n
     return val / np.log(1 + term)
 
 
+def planck_radiance(wavelength_microns: np.ndarray, temperature: np.ndarray | float) -> np.ndarray:
+    """Planck radiance B_lambda in SI units W / m^2 / sr / m.
+
+    Parameters
+    ----------
+    wavelength_microns : np.ndarray
+        Wavelength grid in microns.
+    temperature : np.ndarray or float
+        Temperature in Kelvin. Can be scalar or array.
+    """
+    c = constants.c
+    h = constants.h
+    k = constants.k
+
+    waves_m = np.asarray(wavelength_microns, dtype=float) * 1e-6
+    temperature = np.asarray(temperature, dtype=float)
+    expo = np.exp(h * c / (waves_m * k * temperature[..., None])) - 1.0
+    return (2.0 * h * c**2 / waves_m**5) / expo
+
+
+def compute_bin_widths_from_centers(central_waves: np.ndarray) -> np.ndarray:
+    """Compute positive bin widths from wavelength bin centers in microns."""
+    central_waves = np.asarray(central_waves, dtype=float)
+    if central_waves.size < 2:
+        return np.array([0.2], dtype=float)
+
+    edges = np.empty(central_waves.size + 1, dtype=float)
+    edges[1:-1] = 0.5 * (central_waves[:-1] + central_waves[1:])
+    edges[0] = central_waves[0] - 0.5 * (central_waves[1] - central_waves[0])
+    edges[-1] = central_waves[-1] + 0.5 * (central_waves[-1] - central_waves[-2])
+    widths = np.diff(edges)
+
+    positive = widths > 0
+    if np.any(positive):
+        widths[~positive] = np.nanmin(widths[positive])
+    else:
+        widths[:] = 0.2
+    return widths
+
+
+def band_averaged_radiance(
+    temperature: np.ndarray | float,
+    wavelength_microns: np.ndarray,
+    bin_widths_microns: np.ndarray,
+    n_int: int = 128,
+) -> np.ndarray:
+    """Band-averaged radiance via numerical integration over each wavelength bin."""
+    wavelength_microns = np.atleast_1d(np.asarray(wavelength_microns, dtype=float))
+    bin_widths_microns = np.atleast_1d(np.asarray(bin_widths_microns, dtype=float))
+
+    if wavelength_microns.size != bin_widths_microns.size:
+        raise ValueError("wavelength_microns and bin_widths_microns must have same length")
+
+    total_integral = None
+    total_width_m = 0.0
+
+    for center, width in zip(wavelength_microns, bin_widths_microns):
+        wmin = center - 0.5 * width
+        wmax = center + 0.5 * width
+        wgrid_um = np.linspace(wmin, wmax, int(n_int))
+        wgrid_m = wgrid_um * 1e-6
+
+        bb_grid = planck_radiance(wgrid_um, temperature)
+        bin_integral = np.trapz(bb_grid, x=wgrid_m, axis=-1)
+
+        if total_integral is None:
+            total_integral = bin_integral
+        else:
+            total_integral = total_integral + bin_integral
+
+        total_width_m += (wmax - wmin) * 1e-6
+
+    return total_integral / total_width_m
+
+
+def band_averaged_stellar_radiance(
+    wavelength_microns: np.ndarray,
+    bin_widths_microns: np.ndarray,
+    stellar_model=None,
+    t_star: float = 4300.0,
+    n_int: int = 128,
+) -> np.ndarray:
+    """Band-averaged stellar radiance from either a model interpolator or blackbody.
+
+    Parameters
+    ----------
+    wavelength_microns : np.ndarray
+        Bin centers in microns.
+    bin_widths_microns : np.ndarray
+        Bin widths in microns.
+    stellar_model : callable, optional
+        Callable interpolator returning stellar radiance as a function of
+        wavelength in microns, e.g., a PHOENIX `interp1d` model. If None,
+        uses blackbody radiance with `t_star`.
+    t_star : float, optional
+        Stellar effective temperature for blackbody fallback.
+    n_int : int, optional
+        Number of integration points per bin.
+    """
+    if stellar_model is None:
+        return band_averaged_radiance(t_star, wavelength_microns, bin_widths_microns, n_int=n_int)
+
+    wavelength_microns = np.atleast_1d(np.asarray(wavelength_microns, dtype=float))
+    bin_widths_microns = np.atleast_1d(np.asarray(bin_widths_microns, dtype=float))
+
+    if wavelength_microns.size != bin_widths_microns.size:
+        raise ValueError("wavelength_microns and bin_widths_microns must have same length")
+
+    total_integral = 0.0
+    total_width_m = 0.0
+
+    for center, width in zip(wavelength_microns, bin_widths_microns):
+        wmin = center - 0.5 * width
+        wmax = center + 0.5 * width
+        wgrid_um = np.linspace(wmin, wmax, int(n_int))
+        wgrid_m = wgrid_um * 1e-6
+
+        star_grid = np.asarray(stellar_model(wgrid_um), dtype=float)
+        bin_integral = np.trapz(star_grid, x=wgrid_m)
+
+        total_integral += bin_integral
+        total_width_m += (wmax - wmin) * 1e-6
+
+    return total_integral / total_width_m
+
+
+def depth_to_tb_broadband(
+    depth: np.ndarray,
+    wavelength_microns: np.ndarray,
+    bin_widths_microns: np.ndarray,
+    r_p_r_s: float,
+    stellar_model=None,
+    t_star: float = 4300.0,
+    t_lo_init: float = 200.0,
+    t_hi_init: float = 6000.0,
+    n_iter: int = 60,
+) -> np.ndarray:
+    """Convert eclipse depth to brightness temperature for broadband bins.
+
+    Uses numerical inversion of the Planck band-average relation via bisection.
+    Non-finite input depths are propagated as NaN.
+    """
+    depth_arr = np.asarray(depth, dtype=float)
+    wl_arr = np.atleast_1d(np.asarray(wavelength_microns, dtype=float))
+    dlam_arr = np.atleast_1d(np.asarray(bin_widths_microns, dtype=float))
+
+    if wl_arr.size != dlam_arr.size:
+        raise ValueError("wavelength_microns and bin_widths_microns must have same length")
+
+    # Channel-wise mode:
+    # If depth has a wavelength axis (..., n_wl) and the caller provides
+    # n_wl wavelength bins, invert each channel with its own (wl, dlam).
+    channel_wise = (
+        depth_arr.ndim >= 1
+        and wl_arr.size > 1
+        and depth_arr.shape[-1] == wl_arr.size
+    )
+
+    if channel_wise:
+        valid = np.isfinite(depth_arr) & (depth_arr > 0.0)
+        depth_clipped = np.where(valid, np.clip(depth_arr, 1e-12, None), np.nan)
+        tb = np.full(depth_clipped.shape, np.nan, dtype=float)
+
+        if not np.any(valid):
+            return tb
+
+        b_star_by_channel = np.array([
+            band_averaged_stellar_radiance(
+                np.array([wl_arr[i]], dtype=float),
+                np.array([dlam_arr[i]], dtype=float),
+                stellar_model=stellar_model,
+                t_star=t_star,
+            )
+            for i in range(wl_arr.size)
+        ])
+
+        b_star_valid = np.isfinite(b_star_by_channel)
+        if not np.any(b_star_valid):
+            return tb
+
+        valid = valid & b_star_valid[np.newaxis, ...] if depth_arr.ndim > 1 else (valid & b_star_valid)
+        depth_clipped = np.where(valid, depth_clipped, np.nan)
+
+        b_planet_target = np.full(depth_clipped.shape, np.nan, dtype=float)
+        b_planet_target[valid] = np.clip(
+            (depth_clipped[valid] / (r_p_r_s**2))
+            * np.broadcast_to(b_star_by_channel, depth_clipped.shape)[valid],
+            1e-30,
+            None,
+        )
+
+        t_lo = np.full(depth_clipped.shape, float(t_lo_init), dtype=float)
+        t_hi = np.full(depth_clipped.shape, float(t_hi_init), dtype=float)
+
+        for _ in range(int(n_iter)):
+            t_mid = 0.5 * (t_lo + t_hi)
+            b_mid = np.full(depth_clipped.shape, np.nan, dtype=float)
+
+            for i in range(wl_arr.size):
+                b_mid[..., i] = band_averaged_radiance(
+                    t_mid[..., i],
+                    np.array([wl_arr[i]], dtype=float),
+                    np.array([dlam_arr[i]], dtype=float),
+                )
+
+            low_mask = (b_mid < b_planet_target) & valid
+            high_mask = (~low_mask) & valid
+            t_lo[low_mask] = t_mid[low_mask]
+            t_hi[high_mask] = t_mid[high_mask]
+
+        tb[valid] = 0.5 * (t_lo[valid] + t_hi[valid])
+        return tb
+
+    # Backward-compatible single-band mode
+    valid = np.isfinite(depth_arr) & (depth_arr > 0.0)
+    depth_clipped = np.where(valid, np.clip(depth_arr, 1e-12, None), np.nan)
+    tb = np.full(depth_clipped.shape, np.nan, dtype=float)
+
+    b_star_band = band_averaged_stellar_radiance(
+        wl_arr,
+        dlam_arr,
+        stellar_model=stellar_model,
+        t_star=t_star,
+    )
+    if not np.isfinite(b_star_band):
+        return tb
+
+    b_planet_target = np.full(depth_clipped.shape, np.nan, dtype=float)
+    b_planet_target[valid] = np.clip(
+        b_star_band * depth_clipped[valid] / (r_p_r_s**2),
+        1e-30,
+        None,
+    )
+
+    if not np.any(valid):
+        return tb
+
+    t_lo = np.full(depth_clipped.shape, float(t_lo_init), dtype=float)
+    t_hi = np.full(depth_clipped.shape, float(t_hi_init), dtype=float)
+
+    for _ in range(int(n_iter)):
+        t_mid = 0.5 * (t_lo + t_hi)
+        b_mid = band_averaged_radiance(t_mid, wl_arr, dlam_arr)
+        low_mask = (b_mid < b_planet_target) & valid
+        high_mask = (~low_mask) & valid
+        t_lo[low_mask] = t_mid[low_mask]
+        t_hi[high_mask] = t_mid[high_mask]
+
+    tb[valid] = 0.5 * (t_lo[valid] + t_hi[valid])
+    return tb
+
+
 
 def expand_moll_values(values: np.ndarray, moll_mask: np.ndarray, fill_value=np.nan) -> np.ndarray:
     """Expand masked pixel values back to full map pixel length.

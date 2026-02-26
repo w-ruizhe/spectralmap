@@ -18,7 +18,7 @@ Eclipse Maps
    :maxdepth: 1
 
    WASP18b
-   WASP43b
+   WASP43b_MIRI
    WASP43b_NIRSpec
 
 Methods and Analysis
