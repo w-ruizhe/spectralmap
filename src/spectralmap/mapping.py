@@ -8,10 +8,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 from tqdm.auto import tqdm
-
 import starry
-# starry.config.lazy = False  # disable lazy evaluation
-# starry.config.quiet = True  # disable warnings
+starry.config.lazy = False  # disable lazy evaluation
+starry.config.quiet = True  # disable warnings
 from spectralmap.bayesian_linalg import optimize_hyperparameters
 from spectralmap.utilities import expand_moll_values, gamma_log_prior_lambda, solid_angle_weights, log_delta_lambda
 
@@ -74,7 +73,7 @@ class Map:
 
     mode: str = "base"
 
-    def __init__(self, map_res: int = 30, ydeg: int = 2):
+    def __init__(self, map_res: int = 30, ydeg: int = 2, projection: str = "rect"):
         self.map_res = map_res
         self.ydeg = ydeg
         self.map = None
@@ -96,6 +95,7 @@ class Map:
         self.observed_lon_range = None
         self.observed_mask = None
         self.projection = None
+        self.default_projection = projection
         
     @property
     def n_coeff(self) -> int:
@@ -184,7 +184,8 @@ class Map:
         y_fit = y - A_full[:, 0]
         if lambda_enabled:
             if self.intensity_design_matrix_ is None:
-                I_full = self.intensity_design_matrix(projection="rect")
+                projection = self.default_projection if self.projection is None else self.projection
+                I_full = self.intensity_design_matrix(projection=projection)
             else:
                 I_full = self.intensity_design_matrix_
 
@@ -275,10 +276,11 @@ class RotMap(Map):
         ydeg: int | None = None,
         inc: int | None = None,
         observed_mask: np.ndarray | None = None,
+        projection: str = "rect",
     ):
         if ydeg is None:
             ydeg = 5
-        super().__init__(map_res=map_res, ydeg=ydeg)
+        super().__init__(map_res=map_res, ydeg=ydeg, projection=projection)
         self.inc = inc
         self.map = starry.Map(ydeg=ydeg, inc=inc)
         self.observed_mask = observed_mask
@@ -308,10 +310,11 @@ class EclipseMap(Map):
         sec: starry.Secondary | None = None,
         eclipse_depth: float | None = None,
         observed_lon_range: np.ndarray | None = None,
+        projection: str = "rect",
     ):
         if pri is None or sec is None:
             raise ValueError("mode='eclipse' requires both pri and sec.")
-        super().__init__(map_res=map_res, ydeg=ydeg)
+        super().__init__(map_res=map_res, ydeg=ydeg, projection=projection)
         self.pri = pri
         self.sec = sec
         self.sec.map = starry.Map(ydeg=ydeg, map_res=map_res, inc=90) # currently default to edge-on for eclipse mapping
@@ -353,6 +356,7 @@ class Maps:
         mode: str | None = None,
         map_res: int = 30,
         observed_lon_range: np.ndarray | None = None,
+        projection: str = "rect",
         verbose=True,
     ):
         mode_norm = self.mode if mode is None else _normalize_mode(mode)
@@ -364,6 +368,7 @@ class Maps:
         self.lambdas = lambdas
         self.verbose = verbose
         self.observed_lon_range = observed_lon_range
+        self.projection = projection
         self.inc = None
         self.data = None
         self.pri = None
@@ -394,7 +399,7 @@ class Maps:
         self,
         ydegs: np.ndarray,
         data: LightCurveData,
-        projection: str = "moll",
+        projection: str,
     ) -> list[np.ndarray]:
         inc = self._resolve_inc(data)
         I_cached = []
@@ -509,6 +514,7 @@ class RotMaps(Maps):
         verbose=True,
         inc: int | None = None,
         observed_lon_range: np.ndarray | None = None,
+        projection: str = "rect",
     ):
         super().__init__(
             ydegs=ydegs,
@@ -516,6 +522,7 @@ class RotMaps(Maps):
             lambdas=lambdas,
             verbose=verbose,
             observed_lon_range=observed_lon_range,
+            projection=projection,
             mode="rotational",
         )
         self.inc = inc
@@ -527,6 +534,7 @@ class RotMaps(Maps):
             ydeg=ydeg,
             inc=self._resolve_inc(self.data),
             observed_mask=self.observed_mask,
+            projection=self.projection,
         )
 
     def marginalized_maps(self, data: LightCurveData):
@@ -546,7 +554,7 @@ class RotMaps(Maps):
 
         log_prior = np.zeros(n_ydeg, dtype=float) # set uniform prior over ydeg for now
 
-        I_cached = self._cache_intensity_design_matrices(ydegs, data, projection="moll")
+        I_cached = self._cache_intensity_design_matrices(ydegs, data, projection=self.projection)
         n_pix = I_cached[0].shape[0]
 
         I_all_wl = np.zeros((n_wl, n_pix))
@@ -599,6 +607,7 @@ class EclipseMaps(Maps):
         sec: starry.Secondary | None = None,
         eclipse_depth: float | None = None,
         observed_lon_range: np.ndarray | None = None,
+        projection: str = "rect",
         verbose=True,
     ):
         super().__init__(
@@ -608,6 +617,7 @@ class EclipseMaps(Maps):
             verbose=verbose,
             mode="eclipse",
             observed_lon_range=observed_lon_range,
+            projection=projection,
         )
         if (pri is None or sec is None):
             raise ValueError("EclipseMaps requires both primary and secondary objects to be passed in.")
@@ -626,6 +636,7 @@ class EclipseMaps(Maps):
             sec=self.sec,
             eclipse_depth=self.eclipse_depth,
             observed_lon_range=self.observed_lon_range,
+            projection=self.projection,
         )
 
     def _map_for_intensity_cache(self, ydeg: int, inc: int | None) -> Map:
@@ -680,7 +691,7 @@ class EclipseMaps(Maps):
 
         log_prior = np.zeros(n_ydeg, dtype=float) # set uniform prior over ydeg for now
 
-        I_cached = self._cache_intensity_design_matrices(ydegs, data, projection="moll")
+        I_cached = self._cache_intensity_design_matrices(ydegs, data, projection=self.projection)
         n_pix = I_cached[0].shape[0]
 
         I_all_wl = np.zeros((n_wl, n_pix))
@@ -730,7 +741,7 @@ class EclipseMaps(Maps):
         return w_all, I_all_wl, I_cov_all_wl
 
 
-def make_map(mode: str = "rotational", **kwargs) -> Map:
+def make_map(mode: str = "rotational",  **kwargs) -> Map:
     """Factory for rotational/eclipsed mapping classes."""
     mode_norm = _normalize_mode(mode)
     

@@ -37,6 +37,7 @@ warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
 from . import bayesian_linalg
 from . import cluster
 from . import mapping
+from . import plotting
 
-__all__ = ["__version__", "bayesian_linalg", "cluster", "mapping"]
+__all__ = ["__version__", "bayesian_linalg", "cluster", "mapping", "plotting"]
 __version__ = _version("spectralmap")

@@ -4,7 +4,7 @@ from matplotlib.path import Path
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
-
+from spectralmap.plotting import COLOR_LIST
 
 # --- 1. ALGORITHM: BEST POLYGON ---
 def count_points_in_triangle(A, B, C, all_points):
@@ -145,18 +145,18 @@ def find_clusters(F_all_wl, F_cov_all_wl, n_neighbors=100, n_corners=3, plot=Tru
     # --- 4. PLOTTING ---
     if plot:
         plt.figure(figsize=(7, 2.5), dpi=300)
-
-        plot_colors = plt.get_cmap('tab10').colors
+        
+        plot_colors = COLOR_LIST
 
         # 1. Plot UNASSIGNED points (grey, faint)
         mask_unassigned = labels == -1
         plt.scatter(W[mask_unassigned, 0], W[mask_unassigned, 1],
-                    s=5, alpha=0.15, color='#BBBBBB', edgecolor='none', zorder=1)
+                    s=5, alpha=0.15, color=plot_colors[0], edgecolor='none', zorder=1)
 
         # 2. Plot ASSIGNED clusters
         for k in range(K):
             mask = labels == k
-            color = plot_colors[k % len(plot_colors)]
+            color = plot_colors[(k + 1) % len(plot_colors)]
             plt.scatter(W[mask, 0], W[mask, 1],
                         s=15, alpha=0.8, color=color, edgecolor='none', zorder=2,
                         label=f'Cluster {k+1}')
@@ -167,7 +167,7 @@ def find_clusters(F_all_wl, F_cov_all_wl, n_neighbors=100, n_corners=3, plot=Tru
 
         # 4. Labels
         for k in range(K):
-            color = plot_colors[k % len(plot_colors)]
+            color = plot_colors[(k + 1) % len(plot_colors)]
             plt.text(centers[k, 0], centers[k, 1], f'{k+1}',
                     fontsize=10, fontname='Comic Sans MS', fontweight='bold', color='white',
                     ha='center', va='center',
