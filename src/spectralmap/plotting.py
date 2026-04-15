@@ -28,7 +28,7 @@ PAPER_FIGURES_DIR = "/Users/rworzger/Library/Mobile Documents/com~apple~CloudDoc
 ECLIPSE_PAPER_FIGURES_DIR = '/Users/rworzger/Library/Mobile Documents/com~apple~CloudDocs/EclipseMapping_Paper/figures'
 BG_COLOR = "#E8E8E8"
 tab10 = plt.get_cmap("tab10").colors
-COLOR_LIST = [BG_COLOR] + [tab10[i] for i in [3, 0, 4, 1, 2, 5, 6, 7, 8, 9]]
+COLOR_LIST = [BG_COLOR] + [tab10[i] for i in [0, 3, 4, 1, 2, 5, 6, 7, 8, 9]]
 
 
 def get_cmap(n_colors: int):
@@ -39,7 +39,7 @@ def get_cmap(n_colors: int):
     )
 
 
-def plot_mollweide_rgb(pc1_scores, pc2_scores, mask_2d, upsample=4, extrapolate=True):
+def plot_mollweide_rgb(pc1_scores, pc2_scores, mask_2d, upsample=4, extrapolate=True, ax=None):
     mask_2d = np.asarray(mask_2d, dtype=bool)
     h, w = mask_2d.shape
 
@@ -82,24 +82,38 @@ def plot_mollweide_rgb(pc1_scores, pc2_scores, mask_2d, upsample=4, extrapolate=
 
     rgba_colors = np.dstack((r_sm, g_sm, b_sm, a_sm)).reshape(-1, 4)
 
-    fig = plt.figure(figsize=(12, 6))
-    ax = fig.add_subplot(111, projection="mollweide")
+    if ax is None:
+        fig = plt.figure(figsize=(12, 6))
+        ax = fig.add_subplot(111, projection="mollweide")
+    else:
+        fig = ax.figure
 
     dummy_data = np.zeros((h_new, w_new))
-    mesh = ax.pcolormesh(lon_grid, lat_grid, dummy_data, shading="flat", zorder=2)
+    mesh = ax.pcolormesh(
+        lon_grid,
+        lat_grid,
+        dummy_data,
+        shading="flat",
+        zorder=2,
+        antialiased=False,
+        linewidth=0,
+        edgecolors="none",
+        rasterized=True,
+    )
 
     mesh.set_array(None)
     mesh.set_facecolors(rgba_colors)
     mesh.set_edgecolors("none")
+    mesh.set_linewidth(0)
 
     ax.grid(True, alpha=0.3, linewidth=0.5, zorder=3)
     ax.set_xticklabels([])
     ax.set_yticklabels([])
 
     legend_elements = [
-        Patch(facecolor=(1.0, 0.15, 0.0), label="High PC1 (Red)"),
-        Patch(facecolor=(0.0, 0.15, 1.0), label="High PC2 (Blue)"),
-        Patch(facecolor=(1.0, 0.15, 1.0), label="High Both (Magenta)"),
+        Patch(facecolor=(1.0, 0.15, 0.0), label="High PC1"),
+        Patch(facecolor=(0.0, 0.15, 1.0), label="High PC2"),
+        Patch(facecolor=(1.0, 0.15, 1.0), label="High Both"),
     ]
     ax.legend(handles=legend_elements, loc="lower right", framealpha=0.9)
     ax.set_title("PC1 and PC2 Overlay (Seamless Edge)", pad=15)
@@ -117,6 +131,8 @@ def plot_mollweide_labels(
     show_grid=True,
     hide_ticks=True,
     extrapolate=True,
+    add_colorbar=True,
+    cax=None,
 ):
     moll_mask = np.asarray(moll_mask, dtype=bool)
     if map_res is None:
@@ -172,16 +188,24 @@ def plot_mollweide_labels(
         norm=norm,
         shading="flat",
         antialiased=False,
+        linewidth=0,
+        edgecolors="none",
+        rasterized=True,
     )
 
     if show_grid:
         ax.grid(True, alpha=0.3)
 
-    cb = fig.colorbar(pcm, ax=ax, pad=0.08)
-    cb.set_label("Cluster label")
-    cb.set_ticks(tick_vals)
-    if names is not None:
-        cb.set_ticklabels(names)
+    cb = None
+    if add_colorbar:
+        if cax is None:
+            cb = fig.colorbar(pcm, ax=ax, pad=0.08)
+        else:
+            cb = fig.colorbar(pcm, cax=cax)
+        cb.set_label("Cluster label")
+        cb.set_ticks(tick_vals)
+        if names is not None:
+            cb.set_ticklabels(names)
 
     if hide_ticks:
         ax.set_xticklabels([])
@@ -192,9 +216,10 @@ def plot_mollweide_labels(
     ax.set_xlabel("Longitude (deg)", fontsize=8)
     ax.tick_params(axis="both", which="major", labelsize=7)
 
-    if names is not None:
-        cb.ax.set_yticklabels(names, fontsize=7)
-    cb.ax.yaxis.set_tick_params(length=0)
-    cb.outline.set_edgecolor("black")
+    if cb is not None:
+        if names is not None:
+            cb.ax.set_yticklabels(names, fontsize=7)
+        cb.ax.yaxis.set_tick_params(length=0)
+        cb.outline.set_edgecolor("black")
 
     return fig, ax, pcm, cb

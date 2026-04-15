@@ -21,4 +21,6 @@ docs/source/api/generated/
 
 # Large data files
 docs/source/tutorials/data/
-docs/source/tutorials/Luhman16b_2023 copy.ipynb
+docs/source/tutorials/luhman16/
+docs/source/tutorials/paper_plots/
+docs/source/tutorials/Luhman16B_recovered_spectra_2023.npz

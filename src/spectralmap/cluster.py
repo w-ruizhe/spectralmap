@@ -69,15 +69,16 @@ def find_clusters(F_all_wl, F_cov_all_wl, n_neighbors=100, n_corners=3, plot=Tru
     elif n_corners >= 3:
         corner_indices = get_best_polygon(W, n_corners=n_corners)
         corner_coords = W[corner_indices]
-        # Sort by Angle
-        centroid = np.mean(corner_coords, axis=0)
-        angles = np.arctan2(corner_coords[:, 1] - centroid[1], corner_coords[:, 0] - centroid[0])
-        sort_order = np.argsort(angles)
-        corner_indices = corner_indices[sort_order]
-        corner_coords = corner_coords[sort_order]
+
     else:
         raise ValueError("n_corners must be >= 2")
-
+    
+    # Sort by Angle
+    centroid = np.mean(corner_coords, axis=0)
+    angles = np.arctan2(corner_coords[:, 1] - centroid[1], corner_coords[:, 0] - centroid[0])
+    sort_order = np.argsort(angles)
+    corner_indices = corner_indices[sort_order]
+    corner_coords = corner_coords[sort_order]
     anchor_points = W[corner_indices]
     K = len(anchor_points)
     centers = anchor_points[:, :2]
@@ -151,7 +152,7 @@ def find_clusters(F_all_wl, F_cov_all_wl, n_neighbors=100, n_corners=3, plot=Tru
         # 1. Plot UNASSIGNED points (grey, faint)
         mask_unassigned = labels == -1
         plt.scatter(W[mask_unassigned, 0], W[mask_unassigned, 1],
-                    s=5, alpha=0.15, color=plot_colors[0], edgecolor='none', zorder=1)
+                    s=15, alpha=0.8, color=plot_colors[0], edgecolor='none', zorder=1)
 
         # 2. Plot ASSIGNED clusters
         for k in range(K):
@@ -174,7 +175,7 @@ def find_clusters(F_all_wl, F_cov_all_wl, n_neighbors=100, n_corners=3, plot=Tru
                     bbox=dict(boxstyle='circle,pad=0.3', facecolor=color, edgecolor='white', linewidth=1, alpha=0.9),
                     path_effects=[pe.Stroke(linewidth=1.5, foreground='gray'), pe.Normal()], zorder=10)
 
-        plt.title(f'Classification in PC Space (n_neighbors={n_neighbors})', fontsize=9)
+        plt.title(f'Classification in PC Space ({n_neighbors} neighbors)', fontsize=9)
         plt.xlabel('PC 1')
         plt.ylabel('PC 2')
         plt.gca().set_aspect('equal')

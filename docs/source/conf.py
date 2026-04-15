@@ -62,3 +62,5 @@ intersphinx_mapping = {
     "astropy": ("https://docs.astropy.org/en/stable/", None),
     "starry": ("https://starry.readthedocs.io/en/latest/", None),
 }
+
+nb_execution_mode = "off"

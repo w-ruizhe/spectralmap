@@ -68,6 +68,85 @@ def _normalize_mode(mode: str | None) -> str:
     raise ValueError("mode must be one of {'rotational', 'eclipse'}")
 
 
+def _resolve_limb_darkening(
+    udeg: int | None,
+    u: np.ndarray | list[float] | tuple[float, ...] | float | None,
+) -> tuple[int | None, np.ndarray | None]:
+    if u is None:
+        if udeg is None:
+            return None, None
+        udeg = int(udeg)
+        if udeg < 0:
+            raise ValueError("udeg must be >= 0.")
+        return udeg, None
+
+    u_arr = np.asarray(u, dtype=float)
+    if u_arr.ndim == 0:
+        u_arr = u_arr[np.newaxis]
+    elif u_arr.ndim != 1:
+        raise ValueError("u must be a scalar or 1D array-like.")
+
+    if udeg is None:
+        udeg = int(u_arr.size)
+    else:
+        udeg = int(udeg)
+
+    if udeg < 0:
+        raise ValueError("udeg must be >= 0.")
+    if udeg == 0:
+        raise ValueError("udeg must be > 0 when limb-darkening coefficients are provided.")
+    if u_arr.size != udeg:
+        raise ValueError(f"Expected {udeg} limb-darkening coefficients, got {u_arr.size}.")
+
+    return udeg, u_arr
+
+
+def _set_starry_limb_darkening_coeffs(
+    starry_map,
+    u: np.ndarray | list[float] | tuple[float, ...] | float | None,
+) -> None:
+    if u is None:
+        return
+
+    u_arr = np.asarray(u, dtype=float)
+    if u_arr.ndim == 0:
+        u_arr = u_arr[np.newaxis]
+    elif u_arr.ndim != 1:
+        raise ValueError("u must be a scalar or 1D array-like.")
+
+    if int(starry_map.udeg) != int(u_arr.size):
+        raise ValueError(
+            f"Expected {int(starry_map.udeg)} limb-darkening coefficients for this map, got {int(u_arr.size)}."
+        )
+
+    # In starry, map[1], map[2], ... index u1, u2, ... when udeg > 0.
+    for i, coeff in enumerate(u_arr, start=1):
+        starry_map[i] = float(coeff)
+
+
+def _build_starry_map(
+    ydeg: int,
+    map_res: int | None = None,
+    inc: int | None = None,
+    udeg: int | None = None,
+    u: np.ndarray | list[float] | tuple[float, ...] | float | None = None,
+):
+    udeg_resolved, u_resolved = _resolve_limb_darkening(udeg=udeg, u=u)
+    map_kwargs = {"ydeg": ydeg}
+    if map_res is not None:
+        map_kwargs["map_res"] = map_res
+    if inc is not None:
+        map_kwargs["inc"] = inc
+    if udeg_resolved is not None:
+        map_kwargs["udeg"] = udeg_resolved
+
+    map_obj = starry.Map(**map_kwargs)
+
+    _set_starry_limb_darkening_coeffs(map_obj, u_resolved)
+
+    return map_obj
+
+
 class Map:
     """Shared base class for rotational/eclipsed map inference."""
 
@@ -274,6 +353,8 @@ class RotMap(Map):
         self,
         map_res: int | None = 30,
         ydeg: int | None = None,
+        udeg: int | None = None,
+        u: np.ndarray | list[float] | tuple[float, ...] | float | None = None,
         inc: int | None = None,
         observed_mask: np.ndarray | None = None,
         projection: str = "rect",
@@ -282,7 +363,9 @@ class RotMap(Map):
             ydeg = 5
         super().__init__(map_res=map_res, ydeg=ydeg, projection=projection)
         self.inc = inc
-        self.map = starry.Map(ydeg=ydeg, inc=inc)
+        self.udeg = udeg
+        self.u = u
+        self.map = _build_starry_map(ydeg=ydeg, inc=inc, udeg=udeg, u=u)
         self.observed_mask = observed_mask
 
     def _design_matrix_impl(self, theta: np.ndarray) -> np.ndarray:
@@ -306,6 +389,8 @@ class EclipseMap(Map):
         self,
         map_res: int | None = 30,
         ydeg: int | None = None,
+        udeg: int | None = None,
+        u: np.ndarray | list[float] | tuple[float, ...] | float | None = None,
         pri: starry.Primary | None = None,
         sec: starry.Secondary | None = None,
         eclipse_depth: float | None = None,
@@ -317,7 +402,10 @@ class EclipseMap(Map):
         super().__init__(map_res=map_res, ydeg=ydeg, projection=projection)
         self.pri = pri
         self.sec = sec
-        self.sec.map = starry.Map(ydeg=ydeg, map_res=map_res, inc=90) # currently default to edge-on for eclipse mapping
+        self.udeg = udeg
+        self.u = u
+        # Eclipse mapping currently assumes an edge-on emitting body map.
+        self.sec.map = _build_starry_map(ydeg=ydeg, map_res=map_res, inc=90, udeg=udeg, u=u)
         self.sys = starry.System(pri, sec)
         self.map = self.sec.map
         self.eclipse_depth = eclipse_depth
@@ -378,6 +466,54 @@ class Maps:
         self.b_lambda = None
         self.observed_mask = None
         self.maps = {}
+
+    def _resolve_u_for_wavelength(
+        self,
+        i_wl: int | None = None,
+        n_wl: int | None = None,
+    ) -> np.ndarray | None:
+        u = getattr(self, "u", None)
+        if u is None:
+            return None
+
+        u_arr = np.asarray(u, dtype=float)
+        if u_arr.ndim == 0:
+            return u_arr[np.newaxis]
+        if u_arr.ndim == 1:
+            return u_arr
+        if u_arr.ndim != 2:
+            raise ValueError("u must be None, a scalar, a 1D array, or a 2D array with shape (n_wl, udeg).")
+
+        if n_wl is not None and u_arr.shape[0] != n_wl:
+            raise ValueError(
+                f"Wavelength-dependent u must have shape (n_wl, udeg); expected first dimension {n_wl}, got {u_arr.shape[0]}."
+            )
+
+        if i_wl is None:
+            return u_arr[0]
+        return u_arr[i_wl]
+
+    def _has_wavelength_dependent_u(self, n_wl: int) -> bool:
+        u = getattr(self, "u", None)
+        if u is None:
+            return False
+        u_arr = np.asarray(u, dtype=float)
+        if u_arr.ndim != 2:
+            return False
+        if u_arr.shape[0] != n_wl:
+            raise ValueError(
+                f"Wavelength-dependent u must have shape (n_wl, udeg); expected first dimension {n_wl}, got {u_arr.shape[0]}."
+            )
+        return True
+
+    def _set_map_limb_darkening_for_wavelength(self, map_obj: Map, i_wl: int, n_wl: int) -> None:
+        u_wl = self._resolve_u_for_wavelength(i_wl=i_wl, n_wl=n_wl)
+        if u_wl is None:
+            return
+
+        _set_starry_limb_darkening_coeffs(map_obj.map, u_wl)
+        map_obj.design_matrix_ = None
+        map_obj.intensity_design_matrix_ = None
 
     def _resolve_inc(self, data: LightCurveData) -> int | None:
         return data.inc if data.inc is not None else self.inc
@@ -447,12 +583,13 @@ class Maps:
         """Fit maps across all ydeg values, returning evidence and coefficients for each wavelength."""
         self.data = data
         inc = self._resolve_inc(data)
-        if self.mode == "rotational" and inc == 90:
+        if self.mode == "rotational" and inc == 90 and self.u is None:
             ydegs = self.ydegs[self.ydegs % 2 == 0]
         else:
             ydegs = self.ydegs
 
         n_wl = data.flux.shape[0]
+        self._resolve_u_for_wavelength(i_wl=None, n_wl=n_wl)
         n_ydeg = len(ydegs)
         log_evs = np.zeros((len(ydegs), n_wl))
         coeffs_mus = []
@@ -465,6 +602,7 @@ class Maps:
             cov_nwl = np.zeros((n_wl, map_obj.n_coeff, map_obj.n_coeff))
 
             for i_wl in range(n_wl):
+                self._set_map_limb_darkening_for_wavelength(map_obj, i_wl=i_wl, n_wl=n_wl)
                 if self.verbose:
                     step = max(1, n_wl // 10)
                     if (i_wl == 0) or ((i_wl + 1) % step == 0) or (i_wl + 1 == n_wl):
@@ -511,6 +649,8 @@ class RotMaps(Maps):
         ydegs: np.ndarray,
         map_res=30,
         lambdas: float | None = None,
+        udeg: int | None = None,
+        u: np.ndarray | list[float] | tuple[float, ...] | float | None = None,
         verbose=True,
         inc: int | None = None,
         observed_lon_range: np.ndarray | None = None,
@@ -526,12 +666,16 @@ class RotMaps(Maps):
             mode="rotational",
         )
         self.inc = inc
+        self.udeg = udeg
+        self.u = u
 
     def _make_map_for_ydeg(self, ydeg: int) -> Map:
         return make_map(
             "rotational",
             map_res=self.map_res,
             ydeg=ydeg,
+            udeg=self.udeg,
+            u=self._resolve_u_for_wavelength(i_wl=None),
             inc=self._resolve_inc(self.data),
             observed_mask=self.observed_mask,
             projection=self.projection,
@@ -551,11 +695,25 @@ class RotMaps(Maps):
         """
         ydegs, log_evs_all, coeffs_mus_all, coeffs_covs_all = self.fit_ydegs_fix_lambda(data)
         n_ydeg, n_wl = log_evs_all.shape
+        wavelength_dependent_u = self._has_wavelength_dependent_u(n_wl)
 
         log_prior = np.zeros(n_ydeg, dtype=float) # set uniform prior over ydeg for now
 
-        I_cached = self._cache_intensity_design_matrices(ydegs, data, projection=self.projection)
-        n_pix = I_cached[0].shape[0]
+        if not wavelength_dependent_u:
+            I_cached = self._cache_intensity_design_matrices(ydegs, data, projection=self.projection)
+            n_pix = I_cached[0].shape[0]
+        else:
+            map_ref = self.get_map_for_ydeg(ydegs[0])
+            self._set_map_limb_darkening_for_wavelength(map_ref, i_wl=0, n_wl=n_wl)
+            I_ref = map_ref.intensity_design_matrix(projection=self.projection)
+            n_pix = I_ref.shape[0]
+            self.moll_mask = map_ref.moll_mask
+            self.moll_mask_flat = map_ref.moll_mask_flat
+            self.lat = map_ref.lat
+            self.lon = map_ref.lon
+            self.lat_flat = map_ref.lat_flat
+            self.lon_flat = map_ref.lon_flat
+            self.observed_mask = map_ref.observed_mask
 
         I_all_wl = np.zeros((n_wl, n_pix))
         I_cov_all_wl = np.zeros((n_wl, n_pix, n_pix))
@@ -576,8 +734,14 @@ class RotMaps(Maps):
 
             def get_components(model_idx):
                 i_ydeg = model_idx[0]
+                if wavelength_dependent_u:
+                    map_obj = self.get_map_for_ydeg(ydegs[i_ydeg])
+                    self._set_map_limb_darkening_for_wavelength(map_obj, i_wl=i_wl, n_wl=n_wl)
+                    I_use = map_obj.intensity_design_matrix(projection=self.projection)
+                else:
+                    I_use = I_cached[i_ydeg]
                 return (
-                    I_cached[i_ydeg],
+                    I_use,
                     coeffs_mus_all[i_ydeg][i_wl],
                     coeffs_covs_all[i_ydeg][i_wl],
                 )
@@ -601,6 +765,8 @@ class EclipseMaps(Maps):
         ydegs: np.ndarray,
         map_res = 30,
         lambdas: float | None = None,
+        udeg: int | None = None,
+        u: np.ndarray | list[float] | tuple[float, ...] | float | None = None,
         a_lambda: float | None = None,
         b_lambda: float | None = None,
         pri: starry.Primary | None = None,
@@ -626,12 +792,16 @@ class EclipseMaps(Maps):
         self.eclipse_depth = eclipse_depth
         self.a_lambda = a_lambda
         self.b_lambda = b_lambda
+        self.udeg = udeg
+        self.u = u
 
     def _make_map_for_ydeg(self, ydeg: int) -> Map:
         return make_map(
             "eclipse",
             map_res=self.map_res,
             ydeg=ydeg,
+            udeg=self.udeg,
+            u=self._resolve_u_for_wavelength(i_wl=None),
             pri=self.pri,
             sec=self.sec,
             eclipse_depth=self.eclipse_depth,
@@ -640,7 +810,12 @@ class EclipseMaps(Maps):
         )
 
     def _map_for_intensity_cache(self, ydeg: int, inc: int | None) -> Map:
-        self.sec.map = starry.Map(ydeg=ydeg, map_res=self.map_res)
+        self.sec.map = _build_starry_map(
+            ydeg=ydeg,
+            map_res=self.map_res,
+            udeg=self.udeg,
+            u=self._resolve_u_for_wavelength(i_wl=None),
+        )
         return self._make_map_for_ydeg(ydeg)
         
 
@@ -688,11 +863,36 @@ class EclipseMaps(Maps):
         """
         ydegs, log_evs_all, coeffs_mus_all, coeffs_covs_all = self.fit_ydegs_lambda(data)
         n_lambda, n_ydeg, n_wl = log_evs_all.shape
+        wavelength_dependent_u = self._has_wavelength_dependent_u(n_wl)
 
         log_prior = np.zeros(n_ydeg, dtype=float) # set uniform prior over ydeg for now
 
-        I_cached = self._cache_intensity_design_matrices(ydegs, data, projection=self.projection)
-        n_pix = I_cached[0].shape[0]
+        if not wavelength_dependent_u:
+            I_cached = self._cache_intensity_design_matrices(ydegs, data, projection=self.projection)
+            n_pix = I_cached[0].shape[0]
+        else:
+            map_ref = self.get_map_for_ydeg(ydegs[0])
+            self._set_map_limb_darkening_for_wavelength(map_ref, i_wl=0, n_wl=n_wl)
+            I_ref = map_ref.intensity_design_matrix(projection=self.projection)
+            n_pix = I_ref.shape[0]
+            self.moll_mask = map_ref.moll_mask
+            self.moll_mask_flat = map_ref.moll_mask_flat
+            self.lat = map_ref.lat
+            self.lon = map_ref.lon
+            self.lat_flat = map_ref.lat_flat
+            self.lon_flat = map_ref.lon_flat
+            self.observed_mask = map_ref.observed_mask
+
+            I_cache = {}
+
+            def get_I(i_ydeg: int, i_wl: int) -> np.ndarray:
+                key = (i_ydeg, i_wl)
+                if key in I_cache:
+                    return I_cache[key]
+                map_obj = self.get_map_for_ydeg(ydegs[i_ydeg])
+                self._set_map_limb_darkening_for_wavelength(map_obj, i_wl=i_wl, n_wl=n_wl)
+                I_cache[key] = map_obj.intensity_design_matrix(projection=self.projection)
+                return I_cache[key]
 
         I_all_wl = np.zeros((n_wl, n_pix))
         I_cov_all_wl = np.zeros((n_wl, n_pix, n_pix))
@@ -705,8 +905,9 @@ class EclipseMaps(Maps):
         for i_ydeg in range(n_ydeg):
             for i_lambda in range(n_lambda):
                 for i_wl in range(n_wl):
-                    I_mu = I_cached[i_ydeg] @ coeffs_mus_all[i_lambda][i_ydeg][i_wl] # shape (n_pix)
-                    I_sigma = np.sqrt(np.diag(I_cached[i_ydeg] @ coeffs_covs_all[i_lambda][i_ydeg][i_wl] @ I_cached[i_ydeg].T)) # shape (n_pix)
+                    I_use = get_I(i_ydeg, i_wl) if wavelength_dependent_u else I_cached[i_ydeg]
+                    I_mu = I_use @ coeffs_mus_all[i_lambda][i_ydeg][i_wl] # shape (n_pix)
+                    I_sigma = np.sqrt(np.diag(I_use @ coeffs_covs_all[i_lambda][i_ydeg][i_wl] @ I_use.T)) # shape (n_pix)
                     if np.any(I_mu + sigma_threshold*I_sigma < 0): # looser criterion to avoid rejecting models with small negatives
                         rejected_mask[i_lambda, i_ydeg, i_wl] = True
         
@@ -726,8 +927,9 @@ class EclipseMaps(Maps):
 
             def get_components(model_idx):
                 i_lambda, i_ydeg = model_idx
+                I_use = get_I(i_ydeg, i_wl) if wavelength_dependent_u else I_cached[i_ydeg]
                 return (
-                    I_cached[i_ydeg],
+                    I_use,
                     coeffs_mus_all[i_lambda][i_ydeg][i_wl],
                     coeffs_covs_all[i_lambda][i_ydeg][i_wl],
                 )
