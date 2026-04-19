@@ -38,6 +38,7 @@ open _build/html/index.html
 ## Features
 
 - **`spectralmap.mapping`**: Invert lightcurves to recover surface maps using `starry`.
+- **`spectralmap.mapping` (Doppler mode)**: Solve spectral time-series Doppler imaging problems via `starry.DopplerMap`.
 - **`spectralmap.cluster`**: Identify distinct spectral regions on the recovered maps.
 - **`spectralmap.bayesian_linalg`**: Tools for linear and Bayesian map solving.
 

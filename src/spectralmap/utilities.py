@@ -100,6 +100,113 @@ def bin_flux_by_theta(
 
     return centers, flux_binned, flux_err_binned, counts
 
+
+def bin_flux(
+    time: np.ndarray,
+    flux: np.ndarray,
+    n_bins: int = 50,
+    flux_err: np.ndarray | None = None,
+    min_count: int = 1,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray]:
+    """Bin flux along time without periodic wrap-around.
+
+    This function is intended for S/N-improving time downbinning of time-ordered
+    data. Unlike :func:`bin_flux_by_theta`, it does **not** wrap values modulo
+    360 degrees; bins are created directly on the input time axis.
+
+    Parameters
+    ----------
+    time : np.ndarray
+        1D time array of length n_time.
+    flux : np.ndarray
+        Flux array with shape (..., n_time), e.g. (n_wavelength, n_time).
+    n_bins : int, optional
+        Number of contiguous time bins.
+    flux_err : np.ndarray, optional
+        Uncertainty array with same shape as ``flux``. If provided, uses
+        inverse-variance weighted means per bin.
+    min_count : int, optional
+        Minimum samples required in a bin to report a value.
+
+    Returns
+    -------
+    time_centers : np.ndarray
+        Bin centers, shape (n_bins,).
+    flux_binned : np.ndarray
+        Binned flux, shape (..., n_bins).
+    flux_err_binned : np.ndarray or None
+        Binned uncertainty, shape (..., n_bins), or None if ``flux_err`` is None.
+    counts : np.ndarray
+        Number of samples per bin, shape (n_bins,).
+    """
+    time = np.asarray(time, dtype=float).ravel()
+    flux = np.asarray(flux, dtype=float)
+
+    if time.ndim != 1:
+        raise ValueError("time must be 1D.")
+    if flux.shape[-1] != time.size:
+        raise ValueError(
+            f"flux last dimension ({flux.shape[-1]}) must match time length ({time.size})."
+        )
+    if n_bins < 1:
+        raise ValueError("n_bins must be >= 1.")
+    if min_count < 1:
+        raise ValueError("min_count must be >= 1.")
+
+    t_min = np.nanmin(time)
+    t_max = np.nanmax(time)
+    if not np.isfinite(t_min) or not np.isfinite(t_max):
+        raise ValueError("time must contain at least one finite value.")
+
+    if t_max == t_min:
+        edges = np.linspace(t_min - 0.5, t_max + 0.5, n_bins + 1)
+    else:
+        edges = np.linspace(t_min, t_max, n_bins + 1)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+
+    bin_idx = np.digitize(time, edges, right=False) - 1
+    bin_idx = np.clip(bin_idx, 0, n_bins - 1)
+    counts = np.bincount(bin_idx, minlength=n_bins)
+
+    lead_shape = flux.shape[:-1]
+    flux_flat = flux.reshape(-1, time.size)
+    flux_binned_flat = np.full((flux_flat.shape[0], n_bins), np.nan, dtype=float)
+
+    flux_err_binned_flat = None
+    if flux_err is not None:
+        flux_err = np.asarray(flux_err, dtype=float)
+        if flux_err.shape != flux.shape:
+            raise ValueError("flux_err must have the same shape as flux.")
+        flux_err_flat = flux_err.reshape(-1, time.size)
+        flux_err_binned_flat = np.full((flux_flat.shape[0], n_bins), np.nan, dtype=float)
+
+    for j in range(n_bins):
+        mask = bin_idx == j
+        if np.sum(mask) < min_count:
+            continue
+
+        y = flux_flat[:, mask]
+        if flux_err is None:
+            flux_binned_flat[:, j] = np.nanmean(y, axis=1)
+        else:
+            ye = flux_err_flat[:, mask]
+            w = 1.0 / np.maximum(ye, 1e-30) ** 2
+            valid = np.isfinite(y) & np.isfinite(w) & (w > 0)
+            w_sum = np.sum(np.where(valid, w, 0.0), axis=1)
+
+            num = np.sum(np.where(valid, w * y, 0.0), axis=1)
+            good = w_sum > 0
+            flux_binned_flat[good, j] = num[good] / w_sum[good]
+            flux_err_binned_flat[good, j] = np.sqrt(1.0 / w_sum[good])
+
+    flux_binned = flux_binned_flat.reshape(lead_shape + (n_bins,))
+    if flux_err_binned_flat is None:
+        flux_err_binned = None
+    else:
+        flux_err_binned = flux_err_binned_flat.reshape(lead_shape + (n_bins,))
+
+    return centers, flux_binned, flux_err_binned, counts
+
 def intensity_to_temperature(intensity: np.ndarray, wavelength: np.ndarray) -> np.ndarray:
     """
     Convert spectral intensity to brightness temperature using the inverse Planck function.

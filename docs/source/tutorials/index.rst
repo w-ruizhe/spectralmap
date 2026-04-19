@@ -10,6 +10,7 @@ Rotational Maps
    SIMP0136
    Luhman16b_2023
    Luhman16B_2024
+   Luhman16b_Doppler
 
 Eclipse Maps
 ------------
