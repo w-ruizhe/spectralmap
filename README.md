@@ -23,8 +23,12 @@ pip install spectralmap
 # Optional: editable install with dev & docs dependencies
 # pip install -e ".[dev,docs]"
 
-# Run tests
-pytest
+# Run tests in a controlled isolated environment (installs spectralmap first)
+tox -e py39
+
+# (Alternative, current env)
+# pip install -e ".[dev]"
+# pytest
 ```
 
 Build docs locally:

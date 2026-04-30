@@ -7,10 +7,8 @@ Rotational Maps
 .. toctree::
    :maxdepth: 1
 
+   Luhman16B_2023
    SIMP0136
-   Luhman16b_2023
-   Luhman16B_2024
-   Luhman16b_Doppler
 
 Eclipse Maps
 ------------
@@ -21,6 +19,14 @@ Eclipse Maps
    WASP18b
    WASP43b_MIRI
    WASP43b_NIRSpec
+
+Doppler Maps
+------------
+
+.. toctree::
+   :maxdepth: 1
+
+   doppler_radial_velocity_derivation
 
 Methods and Analysis
 --------------------

@@ -4,13 +4,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import colors as mcolors
 from matplotlib.patches import Patch
-from scipy.ndimage import distance_transform_edt, zoom
+import matplotlib.patheffects as pe
+from scipy.ndimage import distance_transform_edt, zoom, gaussian_filter1d
 
 plt.rcParams.update({
     "text.usetex": True,
     "font.family": "serif",
     "font.size": 8,
-    "axes.labelsize": 8,    
+    "axes.labelsize": 8,
     "axes.titlesize": 8,
     "axes.grid": True,
     "grid.alpha": 0.6,
@@ -39,8 +40,8 @@ def get_cmap(n_colors: int):
     )
 
 
-def plot_mollweide_rgb(pc1_scores, pc2_scores, mask_2d, upsample=4, extrapolate=True, ax=None):
-    mask_2d = np.asarray(mask_2d, dtype=bool)
+def plot_pc_projection(maps, upsample=4, extrapolate=True, ax=None):
+    mask_2d = np.asarray(maps.moll_mask, dtype=bool)
     h, w = mask_2d.shape
 
     def norm_01(x):
@@ -50,8 +51,9 @@ def plot_mollweide_rgb(pc1_scores, pc2_scores, mask_2d, upsample=4, extrapolate=
             return np.zeros_like(x)
         return (x - vmin) / (vmax - vmin)
 
-    r_val = norm_01(pc1_scores)
-    b_val = norm_01(pc2_scores)
+    pc_scores = maps.pc_scores
+    r_val = norm_01(pc_scores[:, 0])
+    b_val = norm_01(pc_scores[:, 1])
 
     r_chan = np.zeros((h, w))
     g_chan = np.full((h, w), 0.15)
@@ -116,35 +118,34 @@ def plot_mollweide_rgb(pc1_scores, pc2_scores, mask_2d, upsample=4, extrapolate=
         Patch(facecolor=(1.0, 0.15, 1.0), label="High Both"),
     ]
     ax.legend(handles=legend_elements, loc="lower right", framealpha=0.9)
-    ax.set_title("PC1 and PC2 Overlay (Seamless Edge)", pad=15)
+    ax.set_title("PC1 and PC2 Overlay", pad=15)
 
     return fig, ax
 
 
-def plot_mollweide_labels(
-    labels_masked,
-    moll_mask,
-    map_res=None,
-    cmap=None,
-    names=None,
+def plot_labels(
+    maps,
     ax=None,
     show_grid=True,
     hide_ticks=True,
     extrapolate=True,
-    add_colorbar=True,
+    colorbar=True,
     cax=None,
 ):
-    moll_mask = np.asarray(moll_mask, dtype=bool)
-    if map_res is None:
-        map_res = moll_mask.shape[0] if moll_mask.ndim == 2 else int(np.sqrt(moll_mask.size))
+    N = maps.regional_spectra.shape[0]
+    cluster_names = ["Background"] + [f"Region {i+1}" for i in range(N - 1)]
+
+    moll_mask = np.asarray(maps.moll_mask, dtype=bool)
     mask_flat = moll_mask.ravel()
+    map_res = maps.map_res
 
     full = np.full(mask_flat.size, np.nan)
-    labels_masked = np.asarray(labels_masked)
-    if labels_masked.size == mask_flat.sum():
-        full[mask_flat] = labels_masked
-    elif labels_masked.size == mask_flat.size:
-        full[:] = labels_masked
+    labels = maps.labels
+
+    if labels.size == mask_flat.sum():
+        full[mask_flat] = labels
+    elif labels.size == mask_flat.size:
+        full[:] = labels
     else:
         raise ValueError("labels size must match mask.sum() or mask.size")
 
@@ -168,10 +169,8 @@ def plot_mollweide_labels(
     max_label = int(labels_int.max())
     tick_vals = np.arange(min_label, max_label + 1)
     bounds = np.arange(min_label - 0.5, max_label + 1.5, 1.0)
-    n_bins = len(bounds) - 1
 
-    if cmap is None:
-        cmap = get_cmap(n_bins)
+    cmap = get_cmap(N)
     cmap_size = int(getattr(cmap, "N", len(getattr(cmap, "colors", []))))
     norm = mcolors.BoundaryNorm(bounds, cmap_size)
 
@@ -197,15 +196,15 @@ def plot_mollweide_labels(
         ax.grid(True, alpha=0.3)
 
     cb = None
-    if add_colorbar:
+    if colorbar:
         if cax is None:
             cb = fig.colorbar(pcm, ax=ax, pad=0.08)
         else:
             cb = fig.colorbar(pcm, cax=cax)
         cb.set_label("Cluster label")
         cb.set_ticks(tick_vals)
-        if names is not None:
-            cb.set_ticklabels(names)
+        if cluster_names is not None:
+            cb.set_ticklabels(cluster_names)
 
     if hide_ticks:
         ax.set_xticklabels([])
@@ -217,9 +216,66 @@ def plot_mollweide_labels(
     ax.tick_params(axis="both", which="major", labelsize=7)
 
     if cb is not None:
-        if names is not None:
-            cb.ax.set_yticklabels(names, fontsize=7)
+        if cluster_names is not None:
+            cb.ax.set_yticklabels(cluster_names, fontsize=7)
         cb.ax.yaxis.set_tick_params(length=0)
         cb.outline.set_edgecolor("black")
 
     return fig, ax, pcm, cb
+
+
+def plot_spectra(maps, axes=None):
+
+    if axes is None:
+        fig, axes = plt.subplots(2, 1, figsize=(7, 5), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+
+    regional_spectra = maps.regional_spectra
+    regional_spectra_std = maps.regional_spectra_std
+    N = maps.regional_spectra.shape[0]
+
+    color_list = COLOR_LIST[:N]
+    cluster_names = ["Background"] + [f"Region {i+1}" for i in range(N - 1)]
+    wl = maps.data.wl
+
+
+    background_flux = regional_spectra[0]
+    # Smooth spectra with a Gaussian filter before plotting.
+    gaussian_sigma = 1
+
+    # Plot the recovered spectra for each region
+    for i in range(1, N):
+        mean_flux = regional_spectra[i]
+        error_flux = regional_spectra_std[i] # Fixed variable name
+        color = color_list[i]
+        label = cluster_names[i]
+
+        axes[0].plot(wl, mean_flux, label=f"{label}", color=color, linewidth=1.2, linestyle='--')
+        axes[0].fill_between(wl,
+                            mean_flux - error_flux,
+                            mean_flux + error_flux,
+                            alpha=0.25, color=color)
+        axes[1].plot(wl, gaussian_filter1d(mean_flux/background_flux, sigma=gaussian_sigma, mode='nearest'), label=f"{label}", color=color,
+                    linewidth=1.2, linestyle='--')
+        axes[1].fill_between(wl,
+                            gaussian_filter1d((mean_flux - error_flux)/background_flux, sigma=gaussian_sigma, mode='nearest'),
+                            gaussian_filter1d((mean_flux + error_flux)/background_flux, sigma=gaussian_sigma, mode='nearest'),
+                            alpha=0.25, color=color)
+
+    # Overlay the range of the observed time-series variability
+    time_series = np.sort(maps.data.flux.T, axis=0) * maps.data.amplitude
+    axes[0].fill_between(wl, time_series[0, :],
+                time_series[-1, :], color='black', alpha=0.10, zorder=0, label="Observed Range")
+
+    axes[1].fill_between(wl, gaussian_filter1d(time_series[0, :]/background_flux, sigma=gaussian_sigma, mode='nearest'),
+                gaussian_filter1d(time_series[-1, :]/background_flux, sigma=gaussian_sigma, mode='nearest'), color='black', alpha=0.10, zorder=0)
+
+    # Formatting
+    axes[1].set_xlabel(r"Wavelength ($\mu$m)", fontsize=9)
+    axes[0].set_ylabel(r"Flux (W/m$^2$/$\mu$m)", fontsize=9)
+    axes[0].set_title("Recovered Regional Spectra")
+    axes[0].legend(loc='upper right', ncol=2)
+    # axes[0].set_xscale("log")
+    # axes[1].set_ylim(0.8, 1.2)
+    axes[1].set_ylabel(r"F/$F_{\rm{mean}}$", fontsize=9)
+
+    return axes

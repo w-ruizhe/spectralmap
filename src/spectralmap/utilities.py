@@ -1,7 +1,12 @@
+"""Utility functions for binning, radiance conversion, and map reshaping."""
+
 from __future__ import annotations
 
 import numpy as np
 from scipy import constants
+from typing import Tuple
+import os
+from pathlib import Path
 
 
 
@@ -231,16 +236,16 @@ def intensity_to_temperature(intensity: np.ndarray, wavelength: np.ndarray) -> n
     # though physically intensity must be > 0.
     
     val = (h * c) / (wavelength * k)
-    # Planck: I = (2hc^2/lambda_fix^5) * 1/(exp(hc/lambda_fix k T) - 1)
-    # exp(hc/lambda_fix k T) - 1 = 2hc^2 / (lambda_fix^5 * I)
-    # T = (hc/lambda_fix k) / ln(1 + 2hc^2/(lambda_fix^5 * I))
+    # Planck: I = (2hc^2/lamda_fix^5) * 1/(exp(hc/lamda_fix k T) - 1)
+    # exp(hc/lamda_fix k T) - 1 = 2hc^2 / (lamda_fix^5 * I)
+    # T = (hc/lamda_fix k) / ln(1 + 2hc^2/(lamda_fix^5 * I))
     
     term = (2 * h * c**2) / (wavelength**5 * intensity)
     return val / np.log(1 + term)
 
 
 def planck_radiance(wavelength_microns: np.ndarray, temperature: np.ndarray | float) -> np.ndarray:
-    """Planck radiance B_lambda in SI units W / m^2 / sr / m.
+    """Planck radiance B_lamda in SI units W / m^2 / sr / m.
 
     Parameters
     ----------
@@ -277,6 +282,51 @@ def compute_bin_widths_from_centers(central_waves: np.ndarray) -> np.ndarray:
     else:
         widths[:] = 0.2
     return widths
+
+
+def load_quadratic_limb_darkening(path: str | os.PathLike, wl: np.ndarray) -> np.ndarray:
+    """Load quadratic limb-darkening coefficients and interpolate onto `wl`.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to a CSV file containing columns ``wavelength_um``, ``u1``, ``u2``.
+    wl : np.ndarray
+        Target wavelength grid (in microns) to interpolate the coefficients onto.
+
+    Returns
+    -------
+    np.ndarray
+        Array of shape (n_wavelengths, 2) with columns [u1_interp, u2_interp].
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Limb-darkening file not found: {p}")
+
+    ld = np.genfromtxt(
+        str(p),
+        delimiter=",",
+        names=True,
+        dtype=None,
+        encoding=None,
+        invalid_raise=False,
+        autostrip=True,
+        comments="#",
+    )
+
+    ld_wl = np.asarray(ld["wavelength_um"], dtype=float)
+    u1 = np.asarray(ld["u1"], dtype=float)
+    u2 = np.asarray(ld["u2"], dtype=float)
+
+    order = np.argsort(ld_wl)
+    ld_wl = ld_wl[order]
+    u1 = u1[order]
+    u2 = u2[order]
+
+    u1_wl = np.interp(wl, ld_wl, u1)
+    u2_wl = np.interp(wl, ld_wl, u2)
+    u_wl = np.column_stack([u1_wl, u2_wl])
+    return u_wl
 
 
 def band_averaged_radiance(
@@ -518,41 +568,6 @@ def expand_moll_values(values: np.ndarray, moll_mask: np.ndarray, fill_value=np.
     return out
 
 
-def logsumexp(logw):
-    m = np.max(logw)
-    return m + np.log(np.sum(np.exp(logw - m)))
-
-
-def gamma_log_prior_lambda(lam, a, b):
-    """
-    Log of an (unnormalized) Gamma(a, b) prior over lambda, vectorized.
-
-    Parameters
-    ----------
-    lam : float or array-like
-        Lambda values (>0).
-    a, b : float
-        Shape and rate parameters (>0).
-
-    Returns
-    -------
-    out : float or np.ndarray
-        Log prior values (same shape as lam). Invalid entries get -inf.
-        If lam is scalar, returns a scalar float.
-    """
-    lam_arr = np.asarray(lam, dtype=float)
-
-    # Invalid hyperparameters -> all -inf (match original behavior)
-    if (a <= 0) or (b <= 0):
-        out = np.full(lam_arr.shape, -np.inf, dtype=float)
-        return float(out) if lam_arr.ndim == 0 else out
-
-    out = np.full(lam_arr.shape, -np.inf, dtype=float)
-    ok = lam_arr > 0
-    out[ok] = (a - 1.0) * np.log(lam_arr[ok]) - b * lam_arr[ok]
-
-    return float(out) if lam_arr.ndim == 0 else out
-
 def solid_angle_weights(lat, lon):
     """Compute pixel solid angle weights for a lat/lon grid."""
     lat_u = np.unique(lat)
@@ -566,18 +581,3 @@ def solid_angle_weights(lat, lon):
     w_pix = dlon * (np.sin(lat_hi) - np.sin(lat_lo))
     w_pix = np.maximum(w_pix, 0.0)
     return w_pix
-
-def log_delta_lambda(lambdas):
-    lambdas = np.asarray(lambdas, dtype=float)
-    if lambdas.ndim != 1 or lambdas.size < 2:
-        raise ValueError("lambdas must be 1D with at least 2 points.")
-    if not np.all(np.diff(lambdas) > 0):
-        raise ValueError("lambdas must be strictly increasing.")
-
-    d = np.empty_like(lambdas)
-    d[1:-1] = 0.5 * (lambdas[2:] - lambdas[:-2])   # centered widths
-    d[0]    = lambdas[1] - lambdas[0]              # edge widths
-    d[-1]   = lambdas[-1] - lambdas[-2]
-    return np.log(d)
-
-

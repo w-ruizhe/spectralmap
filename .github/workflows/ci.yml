@@ -13,9 +13,8 @@ jobs:
         with:
           python-version: "3.9.x"
       - run: python -m pip install -U pip
-      - run: pip install -e ".[dev]"
-
-      - run: pytest
+      - run: pip install tox
+      - run: tox -e py39
 
   docs:
     runs-on: ubuntu-latest
