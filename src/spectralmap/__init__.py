@@ -1,9 +1,10 @@
-"""spectralmap: rotational + eclipse mapping toolkit (template).
+"""Surface-mapping tools for rotational, eclipse, and Doppler observations.
 
-A starting point for:
-- rotational modulation mapping (phase curves, spot/cloud inference)
-- eclipse / occultation mapping (ingress/egress constraints)
-- wavelength-resolved ("spectral") mapping workflows
+The package exposes mode-specific modules for rotational phase curves,
+secondary-eclipse light curves, Doppler imaging spectra, Bayesian linear
+algebra, plotting, clustering, and small data utilities. Heavy optional
+dependencies are imported lazily where possible so that ``import spectralmap``
+remains usable in documentation and lightweight test environments.
 """
 
 import logging
@@ -35,9 +36,19 @@ warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
 # ------------------------------------------
 
 from . import bayesian_linalg
-from . import cluster
-from . import maps
-from . import plotting
+from . import core
 
-__all__ = ["__version__", "bayesian_linalg", "cluster", "maps", "plotting"]
+# Optional convenience imports: keep top-level package import resilient when
+# optional plotting/ML dependencies are not installed.
+try:
+    from . import cluster
+except ModuleNotFoundError:
+    cluster = None
+
+try:
+    from . import plotting
+except ModuleNotFoundError:
+    plotting = None
+
+__all__ = ["__version__", "bayesian_linalg", "core", "cluster", "plotting"]
 __version__ = _version("spectralmap")

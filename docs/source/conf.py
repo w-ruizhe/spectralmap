@@ -43,7 +43,7 @@ autodoc_mock_imports = [
 ]
 
 templates_path = ["_templates"]
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+exclude_patterns = ["_build", "paper_notebooks", "Thumbs.db", ".DS_Store"]
 
 # MyST (optional Markdown support)
 myst_enable_extensions = ["dollarmath", "colon_fence"]
