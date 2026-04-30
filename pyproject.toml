@@ -16,6 +16,7 @@ dependencies = [
   "matplotlib<3.8.0",
   "xarray<2023.1.0",
   "scipy<1.11",
+  "setuptools<81",
   "theano-pymc==1.1.2",
   "aesara-theano-fallback==0.1.0",
   "starry",
