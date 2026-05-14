@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as pe
+from matplotlib.colors import LogNorm
 from sklearn.decomposition import PCA
 from tqdm.auto import tqdm
 import starry
@@ -27,6 +28,10 @@ from spectralmap.plotting import COLOR_LIST
 # Numerical tolerances used in posterior linear algebra.
 SVD_NULLSPACE_TOL = 1e-8
 ALPHA_EFF_FLOOR = 1e-12
+SURFACE_LON_EXTENT = (-180.0, 180.0)
+SURFACE_LAT_EXTENT = (-90.0, 90.0)
+SURFACE_LON_TICKS = np.array([-180.0, -90.0, 0.0, 90.0, 180.0])
+SURFACE_LAT_TICKS = np.array([-90.0, -45.0, 0.0, 45.0, 90.0])
 
 @dataclass
 class LightCurveData:
@@ -43,11 +48,14 @@ class LightCurveData:
         derive phase angles from this axis and trial periods.
     flux
         Flux values with shape ``(n_wavelength, n_time)`` or ``(n_time,)``.
-        The data are normalized by each wavelength channel mean.
+        Flux values are preserved by default to match the pre-refactor API.
+        Set ``normalize=True`` to divide each wavelength channel by its mean.
     flux_err
         Optional flux uncertainties with the same shape as ``flux``.
     wl
         Optional wavelength grid with length ``n_wavelength``.
+    normalize
+        Whether to divide flux and flux errors by the per-channel mean.
     """
 
     theta: np.ndarray | None = None
@@ -55,6 +63,7 @@ class LightCurveData:
     flux: np.ndarray | None = None
     flux_err: np.ndarray | None = None
     wl: np.ndarray | None = None
+    normalize: bool = False
 
     def __post_init__(self):
         """Normalize shapes and validate phase/time consistency."""
@@ -98,8 +107,10 @@ class LightCurveData:
                 "flux must have shape (n_wl, n_time) with n_time == len(theta)"
             )
 
-        self.amplitude = np.nanmean(self.flux, axis=1)
-        self.flux = self.flux / self.amplitude[:, np.newaxis]
+        flux_mean = np.nanmean(self.flux, axis=1)
+        self.amplitude = flux_mean if self.normalize else np.ones_like(flux_mean)
+        if self.normalize:
+            self.flux = self.flux / self.amplitude[:, np.newaxis]
 
         if self.flux_err is not None:
             self.flux_err = np.asarray(self.flux_err)
@@ -111,7 +122,8 @@ class LightCurveData:
             if self.flux_err.shape != self.flux.shape:
                 raise ValueError("flux_err must have the same shape as flux")
 
-            self.flux_err = self.flux_err / self.amplitude[:, np.newaxis]
+            if self.normalize:
+                self.flux_err = self.flux_err / self.amplitude[:, np.newaxis]
 
         if self.wl is not None:
             self.wl = np.asarray(self.wl)
@@ -235,8 +247,8 @@ class Map:
         self.lon = None
         self.lat_flat = None
         self.lon_flat = None
-        self.moll_mask = None
-        self.moll_mask_flat = None
+        self.mask_2d = None
+        self.mask_1d = None
         self.observed_lon_range = None
         self.projection = None
         self.default_projection = projection
@@ -256,7 +268,7 @@ class Map:
     def _design_matrix_impl(self, theta: np.ndarray) -> np.ndarray:
         raise NotImplementedError
 
-    def _intensity_design_matrix_impl(self, lat_safe: np.ndarray, lon_safe: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    def _intensity_design_matrix_impl(self, lat_safe: np.ndarray, lon_safe: np.ndarray) -> np.ndarray:
         raise NotImplementedError
 
     def _apply_coefficients_to_map(self, coeffs: np.ndarray) -> None:
@@ -276,12 +288,17 @@ class Map:
             lat, lon = self.map.get_latlon_grid(res=self.map_res, projection=projection)
             self.lat = self._eval_to_numpy(lat)
             self.lon = self._eval_to_numpy(lon)
-            self.lat_flat = self.lat.flatten()
-            self.lon_flat = self.lon.flatten()
-            self.moll_mask = np.isfinite(self.lat) & np.isfinite(self.lon)
-            self.moll_mask_flat = self.moll_mask.flatten()
+            self.lat_flat = self.lat.ravel()
+            self.lon_flat = self.lon.ravel()
+            finite_mask = np.isfinite(self.lat) & np.isfinite(self.lon)
+            if self.observed_lon_range is None:
+                self.mask_2d = finite_mask
+            else:
+                lon_mask = (self.lon > self.observed_lon_range[0]) & (self.lon < self.observed_lon_range[1])
+                self.mask_2d = finite_mask & lon_mask
+            self.mask_1d = self.mask_2d.ravel()
             self.projection = projection
-            self.observed_mask = (self.lon_flat > self.observed_lon_range[0]) & (self.lon_flat < self.observed_lon_range[1]) if self.observed_lon_range is not None else np.ones_like(self.lon_flat, dtype=bool)
+
         return self.lat, self.lon
 
     def intensity_design_matrix(self, projection: str = "rect") -> np.ndarray:
@@ -291,10 +308,8 @@ class Map:
             return self.intensity_design_matrix_
 
         self.get_latlon_grid(projection=projection)
-        mask = self.moll_mask_flat
-        I = self._intensity_design_matrix_impl(self.lat_flat[mask], self.lon_flat[mask])
+        I = self._intensity_design_matrix_impl(self.lat_flat[self.mask_1d], self.lon_flat[self.mask_1d])
         I = self._eval_to_numpy(I)
-        I = I[self.observed_mask[mask], :]
         self.intensity_design_matrix_ = I
         self.projection = projection
         return I
@@ -307,7 +322,7 @@ class Map:
         lamda: float | None = None,
         verbose: bool = False,
     ) -> tuple[np.ndarray, np.ndarray, dict]:
-        """Solve the linear-map posterior for one normalized light curve.
+        """Solve the linear-map posterior for one light curve.
 
         Parameters
         ----------
@@ -351,12 +366,12 @@ class Map:
         y_fit = y - A_full[:, 0]
         if lamda_enabled:
 
-            I_full = self.intensity_design_matrix(projection="moll")
+            projection = self.default_projection if self.projection is None else self.projection
+            I_full = self.intensity_design_matrix(projection=projection)
 
             I_fit = I_full[:, 1:]
             I_constraint = I_fit @ img_Vt.T
-            valid_observed = self.moll_mask_flat & self.observed_mask
-            w_pix = solid_angle_weights(self.lat_flat[valid_observed], self.lon_flat[valid_observed])
+            w_pix = solid_angle_weights(self.lat_flat[self.mask_1d], self.lon_flat[self.mask_1d])
         else:
             I_constraint = None
             w_pix = None
@@ -422,18 +437,170 @@ class Map:
             self.map.show(projection=projection, **kwargs)
         return samples
 
-    def plot_lightcurve(self):
-        """Plot the observed light curve and posterior-mean model."""
+    @staticmethod
+    def _rng(random_state=None):
+        if isinstance(random_state, np.random.Generator):
+            return random_state
+        return np.random.default_rng(random_state)
+
+    @staticmethod
+    def _finite_yerr(yerr):
+        if yerr is None:
+            return None
+        yerr_arr = np.asarray(yerr, dtype=float)
+        if yerr_arr.ndim == 0 and not np.isfinite(float(yerr_arr)):
+            return None
+        if yerr_arr.size > 0 and not np.any(np.isfinite(yerr_arr)):
+            return None
+        return yerr
+
+    @staticmethod
+    def _sample_coefficients(mu, cov, n_samples: int, random_state=None):
+        if n_samples <= 0:
+            return np.empty((0, np.asarray(mu).size), dtype=float)
+        cov = np.asarray(cov, dtype=float)
+        cov = 0.5 * (cov + cov.T)
+        rng = Map._rng(random_state)
+        return rng.multivariate_normal(np.asarray(mu, dtype=float), cov, size=int(n_samples))
+
+    @staticmethod
+    def _setup_lightcurve_axes(ax=None, residual_ax=None, plot_residuals: bool = False):
+        if not plot_residuals:
+            if ax is None:
+                fig, ax = plt.subplots()
+            else:
+                fig = ax.figure
+            return fig, ax, None
+
+        if residual_ax is None and ax is not None and not hasattr(ax, "plot"):
+            axes = np.ravel(ax)
+            if axes.size != 2:
+                raise ValueError("ax must contain exactly two axes when plot_residuals=True.")
+            ax, residual_ax = axes
+
+        if ax is None and residual_ax is None:
+            fig, (ax, residual_ax) = plt.subplots(
+                2,
+                1,
+                sharex=True,
+                gridspec_kw={"height_ratios": [3, 1], "hspace": 0.05},
+            )
+            return fig, ax, residual_ax
+
+        if ax is None or residual_ax is None:
+            raise ValueError("Pass both ax and residual_ax when supplying axes for plot_residuals=True.")
+        if ax.figure is not residual_ax.figure:
+            raise ValueError("ax and residual_ax must belong to the same figure.")
+        return ax.figure, ax, residual_ax
+
+    @staticmethod
+    def _plot_residual_panel(
+        residual_ax,
+        x,
+        residuals,
+        yerr=None,
+        x_label: str = "Phase Angle",
+        residual_kwargs: dict | None = None,
+    ):
+        residual_style = {
+            "fmt": ".",
+            "label": "Residuals",
+            "color": "C0",
+            "alpha": 0.5,
+            "markersize": 1.0,
+        }
+        if residual_kwargs is not None:
+            residual_style.update(residual_kwargs)
+        residual_ax.errorbar(x, residuals, yerr=yerr, **residual_style)
+        residual_ax.axhline(0.0, color="0.3", linestyle="--", linewidth=0.8, zorder=1)
+        residual_ax.set_xlabel(x_label)
+        residual_ax.set_ylabel("Residual")
+
+    def plot_lightcurve(
+        self,
+        n_samples: int = 0,
+        *,
+        ax=None,
+        residual_ax=None,
+        random_state=None,
+        plot_mean: bool = True,
+        plot_residuals: bool = False,
+        data_kwargs: dict | None = None,
+        model_kwargs: dict | None = None,
+        sample_kwargs: dict | None = None,
+        residual_kwargs: dict | None = None,
+    ):
+        """Plot the observed light curve with optional posterior samples.
+
+        Parameters
+        ----------
+        n_samples
+            Number of coefficient posterior samples to draw and plot. The
+            default of 0 preserves the previous behavior of plotting only the
+            posterior-mean model.
+        ax
+            Optional Matplotlib axes.
+        residual_ax
+            Optional Matplotlib axes for residuals when ``plot_residuals=True``.
+        random_state
+            Seed or ``numpy.random.Generator`` used for posterior samples.
+        plot_mean
+            Whether to plot the posterior-mean model curve.
+        plot_residuals
+            Whether to add a lower panel showing ``data - posterior mean``.
+        data_kwargs, model_kwargs, sample_kwargs, residual_kwargs
+            Optional keyword overrides passed to Matplotlib.
+        """
         if self.flux is None or self.theta is None:
             print("No light curve data to plot. Run solve_posterior() first.")
             return
-        import matplotlib.pyplot as plt
-        plt.errorbar(self.theta, self.flux, yerr=self.flux_err, label="Data")
-        model_flux = self.design_matrix_ @ self.mu
-        plt.plot(self.theta, model_flux, label="Model", color="C1", zorder=10)
-        plt.xlabel("Phase Angle")
-        plt.ylabel("Flux")
-        plt.legend()
+        if self.mu is None or self.cov is None:
+            raise RuntimeError("No posterior to plot. Run solve_posterior() first.")
+
+        fig, ax, residual_ax = self._setup_lightcurve_axes(
+            ax=ax,
+            residual_ax=residual_ax,
+            plot_residuals=plot_residuals,
+        )
+
+        data_style = {"fmt": ".", "label": "Data", "color": "C0", "alpha": 0.5, "markersize": 1.0}
+        if data_kwargs is not None:
+            data_style.update(data_kwargs)
+        yerr = self._finite_yerr(self.flux_err)
+        ax.errorbar(self.theta, self.flux, yerr=yerr, **data_style)
+
+        A = self.design_matrix_ if self.design_matrix_ is not None else self.design_matrix(self.theta)
+        mean_model = A @ self.mu
+
+        if n_samples:
+            sample_style = {"color": "C1", "alpha": 0.15, "lw": 1.0, "zorder": 5}
+            if sample_kwargs is not None:
+                sample_style.update(sample_kwargs)
+            label = sample_style.pop("label", "Posterior samples")
+            for i, coeffs in enumerate(self._sample_coefficients(self.mu, self.cov, n_samples, random_state=random_state)):
+                ax.plot(self.theta, A @ coeffs, label=label if i == 0 else None, **sample_style)
+
+        if plot_mean:
+            model_style = {"label": "Posterior mean", "color": "C1", "zorder": 10}
+            if model_kwargs is not None:
+                model_style.update(model_kwargs)
+            ax.plot(self.theta, mean_model, **model_style)
+
+        if plot_residuals:
+            self._plot_residual_panel(
+                residual_ax,
+                self.theta,
+                np.asarray(self.flux, dtype=float) - mean_model,
+                yerr=yerr,
+                residual_kwargs=residual_kwargs,
+            )
+            ax.set_xlabel("")
+        else:
+            ax.set_xlabel("Phase Angle")
+
+        ax.set_ylabel("Flux")
+        ax.legend()
+        return (fig, (ax, residual_ax)) if plot_residuals else (fig, ax)
 
 
 
@@ -444,16 +611,19 @@ class Maps:
         self,
         map_res: int = 30,
         observed_lon_range: np.ndarray | None = None,
+        projection: str = "rect",
         verbose=True,
     ):
         self.map_res = map_res
         self.verbose = verbose
         self.observed_lon_range = observed_lon_range
+        self.projection = projection
         self.data = None
         self.pri = None
         self.sec = None
         self.eclipse_depth = None
-        self.observed_mask = None
+        self.mask_2d = None
+        self.mask_1d = None
         self.maps = {}
         self.fixed_ydeg = None
         self.mixture_ = None
@@ -485,8 +655,6 @@ class Maps:
             posterior mean intensities with shape ``(n_wavelength, n_pixel)``,
             and per-wavelength covariance matrices.
         """
-        if sigma_threshold is not None and sigma_threshold < 0:
-            raise ValueError("sigma_threshold must be >= 0 when provided.")
 
         self.data = data
         n_wl = data.flux.shape[0]
@@ -510,8 +678,10 @@ class Maps:
         )
 
         mixture_logw = [[] for _ in range(n_wl)]
-        mixture_mu = [[] for _ in range(n_wl)]
-        mixture_cov = [[] for _ in range(n_wl)]
+        mixtureI_I_mu = [[] for _ in range(n_wl)]
+        mixtureI_I_cov = [[] for _ in range(n_wl)]
+        mixture_coeff_mu = [[] for _ in range(n_wl)]
+        mixture_coeff_cov = [[] for _ in range(n_wl)]
         mixture_meta = [[] for _ in range(n_wl)]
 
         map_cache = {}
@@ -564,16 +734,15 @@ class Maps:
 
                                 # Limb-darkening updates can invalidate cached matrices.
                                 # Always rebuild/use the current intensity design matrix.
-                                I_use = map_obj.intensity_design_matrix(projection="moll")
+                                I_use = map_obj.intensity_design_matrix(projection=self.projection)
 
                                 if not geometry_initialized:
-                                    self.moll_mask = map_obj.moll_mask
-                                    self.moll_mask_flat = map_obj.moll_mask_flat
+                                    self.mask_2d = map_obj.mask_2d
+                                    self.mask_1d = map_obj.mask_1d
                                     self.lat = map_obj.lat
                                     self.lon = map_obj.lon
                                     self.lat_flat = map_obj.lat_flat
                                     self.lon_flat = map_obj.lon_flat
-                                    self.observed_mask = map_obj.observed_mask
                                     geometry_initialized = True
 
                                 I_mu = I_use @ mu
@@ -587,8 +756,10 @@ class Maps:
                                         logw = float(-np.inf)
 
                                 mixture_logw[i_wl].append(logw)
-                                mixture_mu[i_wl].append(I_mu)
-                                mixture_cov[i_wl].append(I_cov)
+                                mixtureI_I_mu[i_wl].append(I_mu)
+                                mixtureI_I_cov[i_wl].append(I_cov)
+                                mixture_coeff_mu[i_wl].append(mu.copy())
+                                mixture_coeff_cov[i_wl].append(cov.copy())
                                 mixture_meta[i_wl].append(
                                     {
                                         "inc": inc_value,
@@ -612,9 +783,11 @@ class Maps:
 
         mixture_weights, spatial_intensity, spatial_intensity_cov = self._finalize_mixture(
             mixture_logw,
-            mixture_mu,
-            mixture_cov,
+            mixtureI_I_mu,
+            mixtureI_I_cov,
             mixture_meta,
+            mixture_coeff_mu,
+            mixture_coeff_cov,
             axes={"inc": inc, "ydeg": ydeg, "prot": prot, "lamda": lamda},
         )
 
@@ -626,7 +799,7 @@ class Maps:
         self.spatial_intensity_cov = spatial_intensity_cov
         self.spatial_spectra = spatial_spectra
         self.spatial_spectra_cov = spatial_spectra_cov
-        return mixture_weights, spatial_intensity, spatial_intensity_cov
+        return mixture_weights, spatial_spectra, spatial_spectra_cov
 
 
     def find_clusters(self, n_neighbors=100, n_corners=3, plot=True):
@@ -759,7 +932,478 @@ class Maps:
 
             return fig, ax
 
+    def plot_pc_projection(self, upsample=4, extrapolate=False, ax=None):
+        """Plot the PC1/PC2 surface projection.
 
+        The implementation lives in :mod:`spectralmap.plotting`; this method is
+        only a convenience wrapper so users can call it directly from a
+        ``Maps`` instance.
+        """
+        from spectralmap.plotting import plot_pc_projection
+
+        return plot_pc_projection(self, upsample=upsample, extrapolate=extrapolate, ax=ax)
+
+
+    def plot_labels(
+        self,
+        ax=None,
+        show_grid=True,
+        hide_ticks=True,
+        extrapolate=False,
+        colorbar=True,
+        cax=None,
+    ):
+        """Plot clustered region labels on the surface map."""
+        from spectralmap.plotting import plot_labels
+
+        return plot_labels(
+            self,
+            ax=ax,
+            show_grid=show_grid,
+            hide_ticks=hide_ticks,
+            extrapolate=extrapolate,
+            colorbar=colorbar,
+            cax=cax,
+        )
+
+    def plot_spectra(self, axes=None, **kwargs):
+        """Plot recovered regional spectra after find_clusters()."""
+        from spectralmap.plotting import plot_spectra
+
+        return plot_spectra(self, axes=axes, **kwargs)
+
+    def show(
+        self,
+        i_wl: int = 0,
+        n_samples: int = 0,
+        *,
+        random_state=None,
+        projection: str | None = None,
+        cmap: str = "inferno",
+        colorbar: bool = True,
+        figsize: tuple[float, float] | None = None,
+        share_axes: bool = True,
+        **imshow_kwargs,
+    ):
+        """Show the marginalized surface map mean or posterior samples.
+
+        Parameters
+        ----------
+        i_wl
+            Wavelength index to show.
+        n_samples
+            If 0, plot the marginalized posterior mean map. If positive, draw
+            and plot that many map-intensity samples.
+        random_state
+            Seed or ``numpy.random.Generator`` used for posterior samples.
+        projection
+            Kept for API compatibility. The grid projection is the projection
+            used during ``marginalize``.
+        cmap, colorbar, figsize, share_axes, imshow_kwargs
+            Matplotlib display controls.
+        """
+        if not hasattr(self, "spatial_intensity") or not hasattr(self, "spatial_intensity_cov"):
+            raise RuntimeError("No marginalized surface posterior is available. Run marginalize() first.")
+
+        if n_samples < 0:
+            raise ValueError("n_samples must be >= 0.")
+
+        if n_samples == 0:
+            maps_to_plot = [self.spatial_intensity[i_wl]]
+        else:
+            rng = Map._rng(random_state)
+            cov = np.asarray(self.spatial_intensity_cov[i_wl], dtype=float)
+            cov = 0.5 * (cov + cov.T)
+            samples = rng.multivariate_normal(np.asarray(self.spatial_intensity[i_wl], dtype=float), cov, size=int(n_samples))
+            maps_to_plot = list(np.atleast_2d(samples))
+
+        n_plot = len(maps_to_plot)
+        grids_to_plot = [self._surface_map_grid(values) for values in maps_to_plot]
+        if "norm" not in imshow_kwargs:
+            finite_grids = [grid[np.isfinite(grid)].ravel() for grid in grids_to_plot]
+            finite_grids = [values for values in finite_grids if values.size]
+            if finite_grids:
+                finite_values = np.concatenate(finite_grids)
+                if "vmin" not in imshow_kwargs:
+                    imshow_kwargs["vmin"] = float(np.nanmin(finite_values))
+                if "vmax" not in imshow_kwargs:
+                    imshow_kwargs["vmax"] = float(np.nanmax(finite_values))
+
+        n_rows, n_cols = self._show_subplot_layout(n_plot)
+        extent = imshow_kwargs.pop("extent", self._surface_map_extent())
+        xticks, yticks = self._surface_axis_ticks(extent)
+        if figsize is None:
+            panel_width = 3.5
+            panel_height = self._show_panel_height(extent, panel_width=panel_width)
+            figsize = (min(panel_width * n_cols, 14.0), panel_height * n_rows)
+        imshow_kwargs.setdefault("aspect", "auto")
+        imshow_kwargs.setdefault("interpolation", "nearest")
+        fig, axes_grid = plt.subplots(
+            n_rows,
+            n_cols,
+            figsize=figsize,
+            squeeze=False,
+            sharex=share_axes,
+            sharey=share_axes,
+            gridspec_kw={"wspace": 0.0, "hspace": 0.0},
+        )
+        fig.subplots_adjust(wspace=0.0, hspace=0.0)
+        axes = axes_grid.ravel()
+
+        images = []
+        for ax, grid in zip(axes[:n_plot], grids_to_plot):
+            im = ax.imshow(grid, origin="lower", extent=extent, cmap=cmap, **imshow_kwargs)
+            self._set_surface_axis_ticks(ax, xticks, yticks)
+            ax.set_xlabel("Longitude (deg)")
+            ax.set_ylabel("Latitude (deg)")
+            images.append(im)
+
+        for ax in axes[n_plot:]:
+            ax.set_visible(False)
+
+        if share_axes and n_plot > 1:
+            xlim = axes[0].get_xlim()
+            ylim = axes[0].get_ylim()
+            for ax in axes[:n_plot]:
+                ax.set_xlim(xlim)
+                ax.set_ylim(ylim)
+                if ax.get_subplotspec().is_first_col():
+                    ax.set_ylabel("Latitude (deg)")
+                    ax.tick_params(axis="y", labelleft=True)
+                else:
+                    ax.set_ylabel("")
+                    ax.tick_params(axis="y", labelleft=False)
+                if ax.get_subplotspec().is_last_row():
+                    ax.set_xlabel("Longitude (deg)")
+                    ax.tick_params(axis="x", labelbottom=True)
+                else:
+                    ax.set_xlabel("")
+                    ax.tick_params(axis="x", labelbottom=False)
+
+        if colorbar and images:
+            colorbar_axes = list(axes[:n_plot]) if n_plot > 1 else axes[0]
+            fig.colorbar(images[0], ax=colorbar_axes, label="Intensity")
+
+        return fig, axes if n_plot > 1 else axes[0]
+
+
+    def plot_lightcurve(
+        self,
+        i_wl: int = 0,
+        n_samples: int = 0,
+        *,
+        ax=None,
+        residual_ax=None,
+        random_state=None,
+        plot_mean: bool = True,
+        plot_data: bool = True,
+        plot_residuals: bool = False,
+        data_kwargs: dict | None = None,
+        model_kwargs: dict | None = None,
+        sample_kwargs: dict | None = None,
+        residual_kwargs: dict | None = None,
+    ):
+        """Plot a marginalized light-curve posterior after ``marginalize()``.
+
+        The posterior is the full discrete/continuous mixture from
+        ``marginalize``: samples first choose a model component according to
+        its posterior weight, then draw coefficients from that component's
+        Gaussian posterior. Set ``plot_residuals=True`` to add a lower panel
+        showing ``data - posterior mean``.
+        """
+        if self.data is None or self.mixture_ is None:
+            raise RuntimeError("No marginalized posterior is available. Run marginalize() first.")
+
+        components_by_wl = self.mixture_.get("components")
+        weights_by_wl = self.mixture_.get("weights")
+        coeff_mu_by_wl = self.mixture_.get("coeff_mu_components")
+        coeff_cov_by_wl = self.mixture_.get("coeff_cov_components")
+        if (
+            components_by_wl is None
+            or weights_by_wl is None
+            or coeff_mu_by_wl is None
+            or coeff_cov_by_wl is None
+        ):
+            raise RuntimeError(
+                "The marginalized posterior does not contain coefficient-space components. "
+                "Run marginalize() with the current spectralmap version."
+            )
+        if i_wl >= len(components_by_wl):
+            raise IndexError(f"i_wl={i_wl} is out of range for {len(components_by_wl)} wavelength channels.")
+
+        components = components_by_wl[i_wl]
+        weights = np.asarray(weights_by_wl[i_wl], dtype=float)
+        coeff_mu = coeff_mu_by_wl[i_wl]
+        coeff_cov = coeff_cov_by_wl[i_wl]
+        if not components:
+            raise RuntimeError("No mixture components are available for the selected wavelength.")
+        if len(components) != weights.size or len(coeff_mu) != weights.size or len(coeff_cov) != weights.size:
+            raise RuntimeError("Mixture component metadata, weights, and coefficient posteriors are inconsistent.")
+
+        x = self.data.theta if self.data.theta is not None else self.data.time
+        x_label = "Phase Angle" if self.data.theta is not None else "Time"
+        if x is None:
+            raise RuntimeError("No x-axis values are available on the marginalized LightCurveData.")
+
+        fig, ax, residual_ax = Map._setup_lightcurve_axes(
+            ax=ax,
+            residual_ax=residual_ax,
+            plot_residuals=plot_residuals,
+        )
+        yerr = None if self.data.flux_err is None else Map._finite_yerr(self.data.flux_err[i_wl])
+
+        if plot_data:
+            data_style = {"fmt": ".", "label": "Data", "color": "C0", "alpha": 0.5, "markersize": 1.0}
+            if data_kwargs is not None:
+                data_style.update(data_kwargs)
+            ax.errorbar(x, self.data.flux[i_wl], yerr=yerr, **data_style)
+
+        design_cache = {}
+
+        def component_design(i_component):
+            component = components[i_component]
+            key = (
+                int(component["ydeg"]),
+                None if component.get("inc", None) is None else float(component["inc"]),
+                None if component.get("prot", None) is None else float(component["prot"]),
+            )
+            if key not in design_cache:
+                design_cache[key] = self._component_design_matrix(component, i_wl=i_wl)[0]
+            return design_cache[key]
+
+        if n_samples:
+            rng = Map._rng(random_state)
+            component_indices = rng.choice(np.arange(weights.size), size=int(n_samples), p=weights)
+            sample_style = {"color": "C1", "alpha": 0.15, "lw": 1.0, "zorder": 5}
+            if sample_kwargs is not None:
+                sample_style.update(sample_kwargs)
+            label = sample_style.pop("label", "Posterior samples")
+            for i, i_component in enumerate(component_indices):
+                coeffs = Map._sample_coefficients(
+                    coeff_mu[i_component],
+                    coeff_cov[i_component],
+                    1,
+                    random_state=rng,
+                )[0]
+                ax.plot(x, component_design(i_component) @ coeffs, label=label if i == 0 else None, **sample_style)
+
+        if plot_mean or plot_residuals:
+            mean_model = np.zeros_like(self.data.flux[i_wl], dtype=float)
+            for i_component, weight in enumerate(weights):
+                mean_model += float(weight) * (component_design(i_component) @ np.asarray(coeff_mu[i_component], dtype=float))
+
+        if plot_mean:
+            model_style = {"label": "Posterior mean", "color": "C1", "zorder": 10}
+            if model_kwargs is not None:
+                model_style.update(model_kwargs)
+            ax.plot(x, mean_model, **model_style)
+
+        if plot_residuals:
+            Map._plot_residual_panel(
+                residual_ax,
+                x,
+                np.asarray(self.data.flux[i_wl], dtype=float) - mean_model,
+                yerr=yerr,
+                x_label=x_label,
+                residual_kwargs=residual_kwargs,
+            )
+            ax.set_xlabel("")
+        else:
+            ax.set_xlabel(x_label)
+
+        ax.set_ylabel("Flux")
+        ax.legend()
+        return (fig, (ax, residual_ax)) if plot_residuals else (fig, ax)
+
+    def plot_model_weights(
+        self,
+        x_axis: str,
+        y_axis: str,
+        i_wl: int = 0,
+        ax=None,
+        cmap: str = "viridis",
+        colorbar: bool = True,
+        annotate: bool = False,
+        figsize: tuple[float, float] | None = None,
+        log_scale: bool = False,
+        **imshow_kwargs,
+    ):
+        """Plot marginalized model weights as a heatmap over two axes."""
+        grid, x_values, y_values = self.model_weight_grid(x_axis=x_axis, y_axis=y_axis, i_wl=i_wl)
+
+        if ax is None:
+            if figsize is None:
+                figsize = self._model_weight_figsize(len(x_values), len(y_values), colorbar=colorbar)
+            fig, ax = plt.subplots(figsize=figsize, dpi=150)
+        else:
+            fig = ax.figure
+
+        aspect = imshow_kwargs.pop("aspect", "equal")
+        plot_grid = grid
+        norm = imshow_kwargs.pop("norm", None)
+        if log_scale:
+            if norm is not None:
+                raise ValueError("Pass either log_scale=True or norm, not both.")
+            positive = grid[np.isfinite(grid) & (grid > 0)]
+            if positive.size == 0:
+                raise ValueError("Cannot use log_scale=True when all model weights are zero.")
+            vmin = imshow_kwargs.pop("vmin", None)
+            vmax = imshow_kwargs.pop("vmax", None)
+            vmin = float(np.nanmin(positive)) if vmin is None else float(vmin)
+            vmax = float(np.nanmax(positive)) if vmax is None else float(vmax)
+            if vmin <= 0 or vmax <= 0:
+                raise ValueError("Log-scaled model weights require positive vmin and vmax.")
+            norm = LogNorm(vmin=vmin, vmax=vmax)
+            plot_grid = np.ma.masked_less_equal(grid, 0)
+
+        im = ax.imshow(plot_grid, origin="lower", aspect=aspect, cmap=cmap, norm=norm, **imshow_kwargs)
+        ax.set_xlabel(x_axis)
+        ax.set_ylabel(y_axis)
+        ax.set_xticks(np.arange(len(x_values)))
+        ax.set_yticks(np.arange(len(y_values)))
+        x_sig = 2 if x_axis == "lamda" else None
+        y_sig = 2 if y_axis == "lamda" else None
+        ax.set_xticklabels([self._format_axis_value(v, significant_digits=x_sig) for v in x_values])
+        ax.set_yticklabels([self._format_axis_value(v, significant_digits=y_sig) for v in y_values])
+
+        if annotate:
+            for j in range(grid.shape[0]):
+                for i in range(grid.shape[1]):
+                    ax.text(i, j, f"{grid[j, i]:.2g}", ha="center", va="center", color="white")
+
+        if colorbar:
+            fig.colorbar(im, ax=ax, label="Posterior weight")
+
+        return fig, ax, im
+
+
+
+    def model_weight_grid(self, x_axis: str, y_axis: str, i_wl: int = 0):
+        """Aggregate model weights onto two selected marginalization axes.
+
+        Parameters
+        ----------
+        x_axis, y_axis
+            Names of two axes stored in ``self.mixture_["components"]`` such as
+            ``"ydeg"``, ``"inc"``, ``"prot"``, or ``"lamda"``.
+        i_wl
+            Wavelength index whose model weights should be visualized.
+
+        Returns
+        -------
+        grid, x_values, y_values
+            ``grid[j, i]`` is the summed posterior weight for
+            ``y_axis == y_values[j]`` and ``x_axis == x_values[i]``.
+        """
+        if self.mixture_ is None:
+            raise RuntimeError("No marginalized model weights are available. Run marginalize() first.")
+        if x_axis == y_axis:
+            raise ValueError("x_axis and y_axis must be different.")
+
+        components_by_wl = self.mixture_.get("components")
+        weights_by_wl = self.mixture_.get("weights")
+        if components_by_wl is None or weights_by_wl is None:
+            raise RuntimeError("mixture_ does not contain component metadata and weights.")
+
+        if i_wl < 0 or i_wl >= len(components_by_wl):
+            raise IndexError(f"i_wl={i_wl} is out of range for {len(components_by_wl)} wavelength channels.")
+
+        components = components_by_wl[i_wl]
+        weights = np.asarray(weights_by_wl[i_wl], dtype=float)
+        if len(components) != weights.size:
+            raise RuntimeError("Component metadata and weight arrays have inconsistent lengths.")
+        if not components:
+            raise RuntimeError("No mixture components are available for the selected wavelength.")
+
+        valid_axes = set(components[0].keys())
+        missing = [axis for axis in (x_axis, y_axis) if axis not in valid_axes]
+        if missing:
+            raise ValueError(f"Unknown model axis/axes {missing}. Available axes are {sorted(valid_axes)}.")
+
+        x_component_values = [self._canonical_axis_value(component[x_axis]) for component in components]
+        y_component_values = [self._canonical_axis_value(component[y_axis]) for component in components]
+        x_values = self._sorted_axis_values(x_component_values)
+        y_values = self._sorted_axis_values(y_component_values)
+
+        x_index = {value: i for i, value in enumerate(x_values)}
+        y_index = {value: i for i, value in enumerate(y_values)}
+        grid = np.zeros((len(y_values), len(x_values)), dtype=float)
+
+        for weight, x_value, y_value in zip(weights, x_component_values, y_component_values):
+            if not np.isfinite(weight):
+                continue
+            grid[y_index[y_value], x_index[x_value]] += float(weight)
+
+        return grid, x_values, y_values
+
+    def _surface_map_grid(self, values: np.ndarray) -> np.ndarray:
+        if self.mask_2d is None or self.mask_1d is None:
+            raise RuntimeError("No map grid is available. Run marginalize() first.")
+
+        values = np.asarray(values, dtype=float)
+        if values.size != int(np.sum(self.mask_1d)):
+            raise ValueError(
+                f"Expected {int(np.sum(self.mask_1d))} surface values for the observed grid, got {values.size}."
+            )
+
+        flat = np.full(self.mask_1d.shape, np.nan, dtype=float)
+        flat[self.mask_1d] = values
+        return flat.reshape(self.mask_2d.shape)
+
+    def _surface_map_extent(self) -> tuple[float, float, float, float]:
+        if self.lat is None or self.lon is None:
+            raise RuntimeError("No latitude/longitude grid is available. Run marginalize() first.")
+
+        return (*SURFACE_LON_EXTENT, *SURFACE_LAT_EXTENT)
+
+    @staticmethod
+    def _surface_axis_ticks(extent: tuple[float, float, float, float]) -> tuple[np.ndarray, np.ndarray]:
+        lon_min, lon_max, lat_min, lat_max = extent
+        xticks = SURFACE_LON_TICKS[
+            (SURFACE_LON_TICKS >= min(lon_min, lon_max))
+            & (SURFACE_LON_TICKS <= max(lon_min, lon_max))
+        ]
+        yticks = SURFACE_LAT_TICKS[
+            (SURFACE_LAT_TICKS >= min(lat_min, lat_max))
+            & (SURFACE_LAT_TICKS <= max(lat_min, lat_max))
+        ]
+        return xticks, yticks
+
+    @staticmethod
+    def _set_surface_axis_ticks(ax, xticks: np.ndarray, yticks: np.ndarray) -> None:
+        ax.set_xticks(xticks)
+        ax.set_yticks(yticks)
+        ax.set_xticklabels([Maps._format_geo_tick(tick) for tick in xticks])
+        ax.set_yticklabels([Maps._format_geo_tick(tick) for tick in yticks])
+
+    @staticmethod
+    def _format_geo_tick(value: float) -> str:
+        if np.isclose(value, np.round(value)):
+            return str(int(np.round(value)))
+        return f"{value:g}"
+
+    @staticmethod
+    def _show_panel_height(
+        extent: tuple[float, float, float, float],
+        *,
+        panel_width: float,
+    ) -> float:
+        lon_min, lon_max, lat_min, lat_max = extent
+        lon_span = abs(lon_max - lon_min)
+        lat_span = abs(lat_max - lat_min)
+        if lon_span <= 0.0 or lat_span <= 0.0:
+            return 2.0
+        return max(1.8, min(3.2, panel_width * lat_span / lon_span))
+
+    @staticmethod
+    def _show_subplot_layout(n_plot: int) -> tuple[int, int]:
+        if n_plot <= 0:
+            raise ValueError("n_plot must be positive.")
+        if n_plot == 1:
+            return 1, 1
+        n_cols = min(4, int(np.ceil(np.sqrt(n_plot))))
+        n_rows = int(np.ceil(n_plot / n_cols))
+        return n_rows, n_cols
 
     @staticmethod
     def _parse_discrete_prior(prior, name: str):
@@ -851,9 +1495,11 @@ class Maps:
     def _finalize_mixture(
         self,
         mixture_logw,
-        mixture_mu,
-        mixture_cov,
+        mixtureI_I_mu,
+        mixtureI_I_cov,
         mixture_meta,
+        mixture_coeff_mu=None,
+        mixture_coeff_cov=None,
         *,
         axes: dict,
     ):
@@ -861,7 +1507,7 @@ class Maps:
         if n_wl == 0:
             raise RuntimeError("No mixture components were evaluated.")
 
-        n_pix = np.asarray(mixture_mu[0][0]).size
+        n_pix = np.asarray(mixtureI_I_mu[0][0]).size
         I_all_wl = np.zeros((n_wl, n_pix))
         I_cov_all_wl = np.zeros((n_wl, n_pix, n_pix))
         weights_by_wl = []
@@ -876,8 +1522,8 @@ class Maps:
             w = w / w_sum
             weights_by_wl.append(w)
 
-            mu_components = np.asarray(mixture_mu[i_wl], dtype=float)
-            cov_components = np.asarray(mixture_cov[i_wl], dtype=float)
+            mu_components = np.asarray(mixtureI_I_mu[i_wl], dtype=float)
+            cov_components = np.asarray(mixtureI_I_cov[i_wl], dtype=float)
 
             mu_mix = np.tensordot(w, mu_components, axes=(0, 0))
             second = np.tensordot(w, cov_components, axes=(0, 0))
@@ -898,11 +1544,89 @@ class Maps:
             "weights": [np.asarray(w, dtype=float) for w in weights_by_wl],
             "log_weights": [np.asarray(x, dtype=float) for x in mixture_logw],
             "components": mixture_meta,
-            "mu_components": mixture_mu,
-            "cov_components": mixture_cov,
+            "mu_components": mixtureI_I_mu,
+            "cov_components": mixtureI_I_cov,
         }
+        if mixture_coeff_mu is not None and mixture_coeff_cov is not None:
+            self.mixture_["coeff_mu_components"] = mixture_coeff_mu
+            self.mixture_["coeff_cov_components"] = mixture_coeff_cov
 
         return w_all, I_all_wl, I_cov_all_wl
+
+    @staticmethod
+    def _canonical_axis_value(value):
+        """Normalize mixture metadata values for grouping and display."""
+        if value is None:
+            return None
+        arr = np.asarray(value)
+        if arr.ndim == 0:
+            value = arr.item()
+        if isinstance(value, float) and not np.isfinite(value):
+            return None
+        if isinstance(value, np.floating) and not np.isfinite(float(value)):
+            return None
+        return value
+
+    @staticmethod
+    def _sorted_axis_values(values):
+        unique = []
+        seen = set()
+        for value in values:
+            key = ("none", None) if value is None else ("value", value)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(value)
+
+        non_none = [v for v in unique if v is not None]
+        none_values = [v for v in unique if v is None]
+        try:
+            non_none = sorted(non_none, key=float)
+        except (TypeError, ValueError):
+            non_none = sorted(non_none, key=str)
+        return non_none + none_values
+
+    @staticmethod
+    def _format_axis_value(value, significant_digits: int | None = None):
+        if value is None:
+            return "None"
+        if isinstance(value, (float, np.floating)):
+            if significant_digits is not None:
+                return f"{float(value):.{int(significant_digits)}g}"
+            return f"{float(value):g}"
+        if isinstance(value, (int, np.integer)):
+            return str(int(value))
+        return str(value)
+
+    @staticmethod
+    def _model_weight_figsize(n_x: int, n_y: int, colorbar: bool = True):
+        """Choose a readable heatmap figure size from grid dimensions."""
+        cell_size = 0.6
+        width = 1.8 + cell_size * max(1, n_x)
+        height = 1.6 + cell_size * max(1, n_y)
+        if colorbar:
+            width += 0.7
+        return (float(np.clip(width, 4.0, 14.0)), float(np.clip(height, 3.0, 10.0)))
+
+    def _component_theta(self, component: dict) -> np.ndarray:
+        if self.data is None:
+            raise RuntimeError("No light curve data are available. Run marginalize() first.")
+        prot_value = component.get("prot", None)
+        if prot_value is None:
+            if self.data.theta is None:
+                raise RuntimeError("Component does not specify a period and data.theta is unavailable.")
+            return self.data.theta
+        return self._theta_from_period(self.data, float(prot_value))
+
+    def _component_design_matrix(self, component: dict, i_wl: int) -> tuple[np.ndarray, np.ndarray]:
+        map_obj = self._make_map(ydeg=int(component["ydeg"]), inc=component.get("inc", None))
+        if hasattr(map_obj, "null_uncertainty"):
+            map_obj.null_uncertainty = self.null_uncertainty
+        n_wl = self.data.flux.shape[0] if self.data is not None else None
+        if n_wl is not None:
+            self._set_map_limb_darkening_for_wavelength(map_obj, i_wl=i_wl, n_wl=n_wl)
+        theta = self._component_theta(component)
+        return map_obj.design_matrix(theta), theta
 
     def _resolve_u_for_wavelength(
         self,

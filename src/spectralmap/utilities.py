@@ -542,20 +542,20 @@ def depth_to_tb_broadband(
 
 
 
-def expand_moll_values(values: np.ndarray, moll_mask: np.ndarray, fill_value=np.nan) -> np.ndarray:
+def expand_values_with_mask(values: np.ndarray, mask: np.ndarray, fill_value=np.nan) -> np.ndarray:
     """Expand masked pixel values back to full map pixel length.
 
     Parameters
     ----------
     values : np.ndarray
         Array whose last dimension is the number of valid moll pixels.
-    moll_mask : np.ndarray
+    mask : np.ndarray
         Boolean mask over full pixels (flat or map_res x map_res).
     fill_value : float
         Fill value for invalid pixels.
     """
     values = np.asarray(values)
-    mask = np.asarray(moll_mask, dtype=bool).ravel()
+    mask = np.asarray(mask, dtype=bool).ravel()
 
     if values.shape[-1] != int(mask.sum()):
         raise ValueError(

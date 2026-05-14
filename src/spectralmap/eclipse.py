@@ -77,12 +77,14 @@ class EclipseMaps(Maps):
         sec: starry.Secondary | None = None,
         eclipse_depth: float | None = None,
         observed_lon_range: np.ndarray | None = None,
+        projection: str = "rect",
         verbose=True,
     ):
         super().__init__(
             map_res=map_res,
-            verbose=verbose,
             observed_lon_range=observed_lon_range,
+            projection=projection,
+            verbose=verbose,
         )
         if (pri is None or sec is None):
             raise ValueError("EclipseMaps requires both primary and secondary objects to be passed in.")
@@ -91,6 +93,7 @@ class EclipseMaps(Maps):
         self.eclipse_depth = eclipse_depth
         self.udeg = udeg
         self.u = u
+        self.projection = projection
 
     def _make_map(self, ydeg: int, inc: float | None) -> Map:
         # For eclipse mode, inclination is encoded on the secondary object.
@@ -104,7 +107,8 @@ class EclipseMaps(Maps):
             pri=self.pri,
             sec=self.sec,
             eclipse_depth=self.eclipse_depth,
-            observed_lon_range=self.observed_lon_range
+            observed_lon_range=self.observed_lon_range,
+            projection=self.projection,
         )
 
 
@@ -141,6 +145,7 @@ def make_maps(
     sec: starry.Secondary | None = None,
     eclipse_depth: float | None = None,
     observed_lon_range: np.ndarray | None = None,
+    projection: str = "rect",
     verbose=True,
 ) -> EclipseMaps:
     """Create a multi-wavelength eclipse mapping driver."""
@@ -152,5 +157,6 @@ def make_maps(
         sec=sec,
         eclipse_depth=eclipse_depth,
         observed_lon_range=observed_lon_range,
+        projection=projection,
         verbose=verbose,
     )

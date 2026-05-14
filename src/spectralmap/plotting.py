@@ -6,6 +6,7 @@ from matplotlib import colors as mcolors
 from matplotlib.patches import Patch
 import matplotlib.patheffects as pe
 from scipy.ndimage import distance_transform_edt, zoom, gaussian_filter1d
+from spectralmap.utilities import expand_values_with_mask
 
 plt.rcParams.update({
     "text.usetex": True,
@@ -40,20 +41,29 @@ def get_cmap(n_colors: int):
     )
 
 
-def plot_pc_projection(maps, upsample=4, extrapolate=True, ax=None):
-    mask_2d = np.asarray(maps.moll_mask, dtype=bool)
+def plot_pc_projection(maps, upsample=4, extrapolate=False, ax=None):
+    mask_1d = maps.mask_1d
+    mask_2d = maps.mask_2d
+    pc_full = expand_values_with_mask(maps.pc_scores.T, mask_1d).T
+    pc_grid = pc_full.reshape(mask_2d.shape + (maps.pc_scores.shape[1],))
     h, w = mask_2d.shape
 
     def norm_01(x):
-        x = np.nan_to_num(x)
-        vmin, vmax = x.min(), x.max()
+        finite = np.isfinite(x)
+        if not np.any(finite):
+            return np.zeros_like(x, dtype=float)
+        vmin, vmax = x[finite].min(), x[finite].max()
+        out = np.zeros_like(x, dtype=float)
         if vmin == vmax:
-            return np.zeros_like(x)
-        return (x - vmin) / (vmax - vmin)
+            return out
+        out[finite] = (x[finite] - vmin) / (vmax - vmin)
+        return out
 
-    pc_scores = maps.pc_scores
-    r_val = norm_01(pc_scores[:, 0])
-    b_val = norm_01(pc_scores[:, 1])
+    if not np.any(mask_2d):
+        raise ValueError("No finite PC scores to plot.")
+
+    r_val = norm_01(pc_grid[..., 0][mask_2d])
+    b_val = norm_01(pc_grid[..., 1][mask_2d])
 
     r_chan = np.zeros((h, w))
     g_chan = np.full((h, w), 0.15)
@@ -128,31 +138,20 @@ def plot_labels(
     ax=None,
     show_grid=True,
     hide_ticks=True,
-    extrapolate=True,
+    extrapolate=False,
     colorbar=True,
     cax=None,
 ):
     N = maps.regional_spectra.shape[0]
     cluster_names = ["Background"] + [f"Region {i+1}" for i in range(N - 1)]
 
-    moll_mask = np.asarray(maps.moll_mask, dtype=bool)
-    mask_flat = moll_mask.ravel()
-    map_res = maps.map_res
+    mask_1d = maps.mask_1d
+    mask_2d = maps.mask_2d
+    labels_full = expand_values_with_mask(maps.labels, mask_1d)
+    img = labels_full.reshape(mask_2d.shape)
 
-    full = np.full(mask_flat.size, np.nan)
-    labels = maps.labels
-
-    if labels.size == mask_flat.sum():
-        full[mask_flat] = labels
-    elif labels.size == mask_flat.size:
-        full[:] = labels
-    else:
-        raise ValueError("labels size must match mask.sum() or mask.size")
-
-    img = full.reshape(map_res, map_res)
-
-    lon_edges = np.linspace(-np.pi, np.pi, map_res + 1)
-    lat_edges = np.linspace(-0.5 * np.pi, 0.5 * np.pi, map_res + 1)
+    lon_edges = np.linspace(-np.pi, np.pi, mask_2d.shape[1] + 1)
+    lat_edges = np.linspace(-0.5 * np.pi, 0.5 * np.pi, mask_2d.shape[0] + 1)
     lon2d, lat2d = np.meshgrid(lon_edges, lat_edges)
 
     if ax is None:
@@ -165,8 +164,12 @@ def plot_labels(
     if not np.any(finite):
         raise ValueError("No finite labels to plot.")
     labels_int = np.asarray(img[finite], dtype=int)
-    min_label = int(labels_int.min())
-    max_label = int(labels_int.max())
+    min_label = -1
+    max_label = N - 2
+    if np.any((labels_int < min_label) | (labels_int > max_label)):
+        raise ValueError(
+            f"Labels must be in the range [{min_label}, {max_label}] for {N} regional spectra."
+        )
     tick_vals = np.arange(min_label, max_label + 1)
     bounds = np.arange(min_label - 0.5, max_label + 1.5, 1.0)
 

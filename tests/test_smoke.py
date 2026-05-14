@@ -95,6 +95,30 @@ def test_doppler_flux_shape_helper_accepts_transpose():
     assert np.allclose(DopplerMap._coerce_flux_shape(flux.T, nt=3, nw=5, label="flux"), flux)
 
 
+def test_plot_pc_projection_accepts_observed_lon_subset():
+    from types import SimpleNamespace
+    import matplotlib.pyplot as plt
+    from spectralmap.plotting import plot_pc_projection
+
+    mask_1d = np.array([True, False, True, False, True, False])
+    maps = SimpleNamespace(
+        mask_2d=mask_1d.reshape(2, 3),
+        mask_1d=mask_1d,
+        pc_scores=np.array(
+            [
+                [0.0, 1.0],
+                [0.5, 0.5],
+                [1.0, 0.0],
+            ],
+            dtype=float,
+        ),
+    )
+
+    fig, ax = plot_pc_projection(maps, upsample=1, extrapolate=False)
+    assert ax.get_title() == "PC1 and PC2 Overlay"
+    plt.close(fig)
+
+
 @pytest.mark.skipif(not _starry_available(), reason="starry is unavailable")
 def test_rotmaps_marginalize_over_ydeg_inc_prot():
     from spectralmap.core import LightCurveData
@@ -104,13 +128,12 @@ def test_rotmaps_marginalize_over_ydeg_inc_prot():
         def __init__(self, ydeg: int, inc: float):
             self.ydeg = int(ydeg)
             self.inc = float(inc)
-            self.moll_mask = np.ones((1, 3), dtype=bool)
-            self.moll_mask_flat = self.moll_mask.ravel()
+            self.mask_2d = np.ones((1, 3), dtype=bool)
+            self.mask_1d = self.mask_2d.ravel()
             self.lat = np.zeros((1, 3), dtype=float)
             self.lon = np.array([[0.0, 30.0, 60.0]], dtype=float)
             self.lat_flat = self.lat.ravel()
             self.lon_flat = self.lon.ravel()
-            self.observed_mask = np.ones(3, dtype=bool)
 
         def solve_posterior(self, y, sigma_y=None, theta=None, lamda=None, verbose=False):
             theta = np.asarray(theta, dtype=float)
@@ -166,13 +189,12 @@ def test_rotmaps_marginalize_over_lambda_axis():
         def __init__(self, ydeg: int, inc: float):
             self.ydeg = int(ydeg)
             self.inc = float(inc)
-            self.moll_mask = np.ones((1, 3), dtype=bool)
-            self.moll_mask_flat = self.moll_mask.ravel()
+            self.mask_2d = np.ones((1, 3), dtype=bool)
+            self.mask_1d = self.mask_2d.ravel()
             self.lat = np.zeros((1, 3), dtype=float)
             self.lon = np.array([[0.0, 30.0, 60.0]], dtype=float)
             self.lat_flat = self.lat.ravel()
             self.lon_flat = self.lon.ravel()
-            self.observed_mask = np.ones(3, dtype=bool)
 
         def solve_posterior(self, y, sigma_y=None, theta=None, lamda=None, verbose=False):
             theta = np.asarray(theta, dtype=float)
@@ -183,6 +205,10 @@ def test_rotmaps_marginalize_over_lambda_axis():
             cov = np.eye(2, dtype=float) * 0.01
             log_ev = -base * base
             return mu, cov, log_ev
+
+        def design_matrix(self, theta):
+            theta = np.asarray(theta, dtype=float)
+            return np.column_stack((np.ones_like(theta), np.cos(np.deg2rad(theta))))
 
         def intensity_design_matrix(self, projection="rect"):
             return np.array(
@@ -201,6 +227,7 @@ def test_rotmaps_marginalize_over_lambda_axis():
         theta=np.array([0.0, 90.0, 180.0, 270.0]),
         flux=np.ones((2, 4), dtype=float),
         flux_err=np.full((2, 4), 0.1, dtype=float),
+        wl=np.array([1.0, 2.0], dtype=float),
     )
 
     w_all, I_all_wl, I_cov_all_wl = maps.marginalize(
@@ -219,6 +246,146 @@ def test_rotmaps_marginalize_over_lambda_axis():
 
     lamda_values = [c["lamda"] for c in maps.mixture_["components"][0]]
     assert set(np.round(lamda_values, 6)) == {100.0, 1000.0}
+    assert len(maps.mixture_["coeff_mu_components"][0]) == n_components
+    assert len(maps.mixture_["coeff_cov_components"][0]) == n_components
+
+    grid, x_values, y_values = maps.model_weight_grid("lamda", "ydeg", i_wl=0)
+    assert grid.shape == (2, 2)
+    assert np.allclose(x_values, [100.0, 1000.0])
+    assert np.allclose(y_values, [2, 4])
+    assert np.isclose(np.sum(grid), 1.0)
+
+    fig, ax, im = maps.plot_model_weights("lamda", "ydeg", i_wl=0, colorbar=False)
+    assert ax.get_xlabel() == "lamda"
+    assert ax.get_ylabel() == "ydeg"
+    assert [tick.get_text() for tick in ax.get_xticklabels()] == ["1e+02", "1e+03"]
+    assert [tick.get_text() for tick in ax.get_yticklabels()] == ["2", "4"]
+    assert im.get_array().shape == (2, 2)
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
+    original_mixture = maps.mixture_
+
+    components = [{"lamda": float(x), "ydeg": y} for y in [2, 4] for x in range(6)]
+    maps.mixture_ = {"components": [components], "weights": [np.full(len(components), 1.0 / len(components))]}
+    fig, ax, im = maps.plot_model_weights("lamda", "ydeg", i_wl=0, colorbar=False)
+    width, height = fig.get_size_inches()
+    assert width > height
+    plt.close(fig)
+
+    components = [{"lamda": float(x), "ydeg": y} for y in range(6) for x in [1, 2]]
+    maps.mixture_ = {"components": [components], "weights": [np.full(len(components), 1.0 / len(components))]}
+    fig, ax, im = maps.plot_model_weights("lamda", "ydeg", i_wl=0, colorbar=False)
+    width, height = fig.get_size_inches()
+    assert height > width
+    plt.close(fig)
+
+    components = [{"lamda": 1.0, "ydeg": 2}, {"lamda": 10.0, "ydeg": 4}]
+    maps.mixture_ = {"components": [components], "weights": [np.array([0.1, 0.9])]}
+    fig, ax, im = maps.plot_model_weights("lamda", "ydeg", i_wl=0, colorbar=True, log_scale=True)
+    assert im.norm.__class__.__name__ == "LogNorm"
+    assert np.ma.is_masked(im.get_array()[0, 1])
+    plt.close(fig)
+
+    maps.mixture_ = original_mixture
+    fig, ax = maps.plot_lightcurve(i_wl=0, n_samples=3, random_state=0)
+    labels = [line.get_label() for line in ax.lines]
+    assert "Posterior samples" in labels
+    assert "Posterior mean" in labels
+    assert ax.containers[0].lines[0].get_markersize() == 1.0
+    assert maps.mixture_ is original_mixture
+    plt.close(fig)
+
+    fig, axes = maps.plot_lightcurve(i_wl=0, plot_residuals=True)
+    ax, residual_ax = axes
+    residual_labels = [container.get_label() for container in residual_ax.containers]
+    assert ax.get_xlabel() == ""
+    assert residual_ax.get_xlabel() == "Phase Angle"
+    assert residual_ax.get_ylabel() == "Residual"
+    assert "Residuals" in residual_labels
+    assert maps.mixture_ is original_mixture
+    plt.close(fig)
+
+    fig, ax = maps.show(i_wl=0, n_samples=0, colorbar=False)
+    assert ax.get_title() == ""
+    assert ax.images[0].get_array().shape == (1, 3)
+    assert ax.images[0].get_extent() == [-180.0, 180.0, -90.0, 90.0]
+    assert ax.get_xlabel() == "Longitude (deg)"
+    assert ax.get_ylabel() == "Latitude (deg)"
+    assert list(ax.get_xticks()) == [-180.0, -90.0, 0.0, 90.0, 180.0]
+    assert list(ax.get_yticks()) == [-90.0, -45.0, 0.0, 45.0, 90.0]
+    plt.close(fig)
+
+    fig, axes = maps.show(i_wl=0, n_samples=2, random_state=0, colorbar=False)
+    assert len(axes) == 2
+    assert axes[0].get_title() == ""
+    assert axes[1].get_title() == ""
+    assert fig.subplotpars.wspace == 0.0
+    assert fig.subplotpars.hspace == 0.0
+    plt.close(fig)
+
+    fig, axes = maps.show(i_wl=0, n_samples=5, random_state=0, colorbar=False)
+    assert len(axes) == 6
+    assert sum(ax.get_visible() for ax in axes) == 5
+    assert axes[0].get_shared_x_axes().joined(axes[0], axes[1])
+    assert axes[0].get_shared_y_axes().joined(axes[0], axes[3])
+    assert all(ax.get_xlim() == axes[0].get_xlim() for ax in axes[:5])
+    assert all(ax.get_ylim() == axes[0].get_ylim() for ax in axes[:5])
+    assert len({ax.images[0].get_clim() for ax in axes[:5]}) == 1
+    assert np.isclose(axes[0].get_position().y0, axes[3].get_position().y1)
+    assert axes[4].get_title() == ""
+    plt.close(fig)
+
+    maps.pc_scores = np.array(
+        [
+            [0.0, 1.0],
+            [0.5, 0.5],
+            [1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    fig, ax = maps.plot_pc_projection(upsample=1, extrapolate=False)
+    assert ax.get_title() == "PC1 and PC2 Overlay"
+    plt.close(fig)
+
+    maps.regional_spectra = np.array(
+        [
+            [1.0, 1.0],
+            [1.1, 0.9],
+        ],
+        dtype=float,
+    )
+    maps.regional_spectra_std = np.full((2, 2), 0.01, dtype=float)
+    maps.regional_spectra_cov = np.zeros((2, 2, 2), dtype=float)
+    maps.labels = np.array([-1, 0, 0], dtype=int)
+
+    fig, ax, pcm, cb = maps.plot_labels(colorbar=False)
+    assert cb is None
+    assert ax.get_xlabel() == "Longitude (deg)"
+    plt.close(fig)
+
+    maps.regional_spectra = np.array(
+        [
+            [1.0, 1.0],
+            [1.1, 0.9],
+            [0.9, 1.1],
+        ],
+        dtype=float,
+    )
+    maps.regional_spectra_std = np.full((3, 2), 0.01, dtype=float)
+    maps.regional_spectra_cov = np.zeros((3, 2, 2), dtype=float)
+    maps.labels = np.array([-1, 1, 1], dtype=int)
+    fig, ax, pcm, cb = maps.plot_labels(colorbar=True)
+    assert [tick.get_text() for tick in cb.ax.get_yticklabels()] == [
+        "Background",
+        "Region 1",
+        "Region 2",
+    ]
+    plt.close(fig)
+
+    axes = maps.plot_spectra()
+    assert axes[0].get_title() == "Recovered Regional Spectra"
+    plt.close(axes[0].figure)
 
 
 @pytest.mark.skipif(not _starry_available(), reason="starry is unavailable")
@@ -238,6 +405,65 @@ def test_lightcurvedata_requires_at_least_one_phase_axis():
         LightCurveData(
             flux=np.ones((1, 2), dtype=float),
         )
+
+
+@pytest.mark.skipif(not _starry_available(), reason="starry is unavailable")
+def test_lightcurvedata_preserves_flux_units_by_default():
+    from spectralmap.core import LightCurveData
+
+    flux = np.array([[2.0, 4.0, 6.0]], dtype=float)
+    flux_err = np.array([[0.2, 0.4, 0.6]], dtype=float)
+
+    data = LightCurveData(
+        theta=np.array([0.0, 90.0, 180.0]),
+        flux=flux,
+        flux_err=flux_err,
+    )
+
+    assert np.allclose(data.flux, flux)
+    assert np.allclose(data.flux_err, flux_err)
+    assert np.allclose(data.amplitude, np.ones(1))
+
+
+@pytest.mark.skipif(not _starry_available(), reason="starry is unavailable")
+def test_lightcurvedata_normalize_is_opt_in():
+    from spectralmap.core import LightCurveData
+
+    flux = np.array([[2.0, 4.0, 6.0]], dtype=float)
+    flux_err = np.array([[0.2, 0.4, 0.6]], dtype=float)
+
+    data = LightCurveData(
+        theta=np.array([0.0, 90.0, 180.0]),
+        flux=flux,
+        flux_err=flux_err,
+        normalize=True,
+    )
+
+    assert np.allclose(data.amplitude, np.array([4.0]))
+    assert np.allclose(data.flux, flux / 4.0)
+    assert np.allclose(data.flux_err, flux_err / 4.0)
+
+
+@pytest.mark.skipif(not _starry_available(), reason="starry is unavailable")
+def test_make_maps_defaults_to_rect_projection():
+    from spectralmap.rotational import make_maps
+
+    maps = make_maps(verbose=False)
+    map_obj = maps._make_map(ydeg=2, inc=85)
+
+    assert maps.projection == "rect"
+    assert map_obj.default_projection == "rect"
+
+
+@pytest.mark.skipif(not _starry_available(), reason="starry is unavailable")
+def test_make_maps_accepts_projection_override():
+    from spectralmap.rotational import make_maps
+
+    maps = make_maps(projection="moll", verbose=False)
+    map_obj = maps._make_map(ydeg=2, inc=85)
+
+    assert maps.projection == "moll"
+    assert map_obj.default_projection == "moll"
 
 
 @pytest.mark.skipif(not _starry_available(), reason="starry is unavailable")
