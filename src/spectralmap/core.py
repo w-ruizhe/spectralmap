@@ -21,7 +21,7 @@ import starry
 from spectralmap.cluster import get_best_polygon
 starry.config.lazy = False  # disable lazy evaluation
 starry.config.quiet = True  # disable warnings
-from spectralmap.bayesian_linalg import optimize_hyperparameters
+from spectralmap.bayesian_linalg import gaussian_linear_posterior, optimize_hyperparameters
 from spectralmap.utilities import solid_angle_weights
 from spectralmap.plotting import COLOR_LIST
 
@@ -320,6 +320,9 @@ class Map:
         sigma_y: np.ndarray | None = None,
         theta: np.ndarray | None = None,
         lamda: float | None = None,
+        prior_mean: np.ndarray | None = None,
+        prior_covariance: np.ndarray | None = None,
+        prior_precision: np.ndarray | float | None = None,
         verbose: bool = False,
     ) -> tuple[np.ndarray, np.ndarray, dict]:
         """Solve the linear-map posterior for one light curve.
@@ -334,6 +337,10 @@ class Map:
             Observation phase angles in degrees. Required on first call.
         lamda
             Optional positive intensity regularization precision.
+        prior_mean, prior_covariance, prior_precision
+            Optional fixed Gaussian prior for the free coefficients. The first
+            starry coefficient remains fixed to 1 in the current map model, so
+            full-size priors are sliced to the free-coefficient block.
         verbose
             Passed through to hyperparameter optimization.
 
@@ -356,6 +363,88 @@ class Map:
 
         A_full = self.design_matrix(theta)
         A_fit = A_full[:, 1:]
+        fixed_prior_enabled = prior_covariance is not None or prior_precision is not None
+        if fixed_prior_enabled and lamda_enabled:
+            raise ValueError("Fixed dense coefficient priors cannot be combined with lamda.")
+
+        default_mu0 = np.r_[0.0 if self.eclipse_depth is None else float(self.eclipse_depth), np.zeros(A_fit.shape[1] - 1)]
+        if fixed_prior_enabled:
+            if prior_mean is None:
+                mu0_fit = default_mu0
+            else:
+                prior_mean = np.asarray(prior_mean, dtype=float).reshape(-1)
+                if prior_mean.shape == (A_full.shape[1],):
+                    mu0_fit = prior_mean[1:]
+                elif prior_mean.shape == (A_fit.shape[1],):
+                    mu0_fit = prior_mean
+                else:
+                    raise ValueError(
+                        "prior_mean must have length equal to either the full coefficient "
+                        f"count ({A_full.shape[1]}) or free coefficient count ({A_fit.shape[1]})."
+                    )
+
+            prior_cov_fit = None
+            if prior_covariance is not None:
+                prior_covariance = np.asarray(prior_covariance, dtype=float)
+                if prior_covariance.shape == (A_full.shape[1], A_full.shape[1]):
+                    prior_cov_fit = prior_covariance[1:, 1:]
+                elif prior_covariance.shape == (A_fit.shape[1], A_fit.shape[1]):
+                    prior_cov_fit = prior_covariance
+                else:
+                    raise ValueError(
+                        "prior_covariance must have shape equal to either the full "
+                        f"coefficient block ({A_full.shape[1]}, {A_full.shape[1]}) "
+                        f"or free block ({A_fit.shape[1]}, {A_fit.shape[1]})."
+                    )
+
+            prior_prec_fit = None
+            if prior_precision is not None:
+                prior_precision = np.asarray(prior_precision, dtype=float)
+                if prior_precision.ndim == 0:
+                    prior_prec_fit = float(prior_precision)
+                elif prior_precision.shape == (A_full.shape[1], A_full.shape[1]):
+                    prior_prec_fit = prior_precision[1:, 1:]
+                elif prior_precision.shape == (A_fit.shape[1], A_fit.shape[1]):
+                    prior_prec_fit = prior_precision
+                elif prior_precision.shape == (A_fit.shape[1],):
+                    prior_prec_fit = prior_precision
+                elif prior_precision.shape == (A_full.shape[1],):
+                    prior_prec_fit = prior_precision[1:]
+                else:
+                    raise ValueError(
+                        "prior_precision must be scalar, full-size, or free-size."
+                    )
+
+            result = gaussian_linear_posterior(
+                A_fit,
+                y - A_full[:, 0],
+                sigma_y=sigma_y,
+                prior_mean=mu0_fit,
+                prior_covariance=prior_cov_fit,
+                prior_precision=prior_prec_fit,
+            )
+            mu_fit = result["posterior_mean"]
+            cov_fit = result["posterior_cov"]
+            mu = np.zeros(A_full.shape[1])
+            mu[0] = 1.0
+            mu[1:] = mu_fit
+            cov = np.zeros((A_full.shape[1], A_full.shape[1]))
+            cov[1:, 1:] = cov_fit
+            self.hyper = {
+                "alpha": None,
+                "beta": None,
+                "lamda": None,
+                "log_ev": float(result["log_evidence"]),
+                "log_ev_marginalized": float(result["log_evidence"]),
+                "fixed_prior": True,
+            }
+            self.mu = mu
+            self.cov = cov
+            self.flux = y
+            self.flux_err = sigma_y
+            self.theta = theta
+            return mu, cov, float(result["log_evidence"])
+
         U, s, Vt = np.linalg.svd(A_fit, full_matrices=False)
         U = U * s[np.newaxis, :]
         null_space = s <= SVD_NULLSPACE_TOL
@@ -376,9 +465,7 @@ class Map:
             I_constraint = None
             w_pix = None
 
-
-        mu0 = np.r_[0.0 if self.eclipse_depth is None else float(self.eclipse_depth), np.zeros(A_fit.shape[1] - 1)]
-        mu0_img = img_Vt @ mu0          # because img_Vt is (r, k) so img_Vt @ mu0 gives (r,)
+        mu0_img = img_Vt @ default_mu0          # because img_Vt is (r, k) so img_Vt @ mu0 gives (r,)
 
         mu_img, cov_img, alpha, beta_out, log_ev, log_ev_marginalized = optimize_hyperparameters(
             img_U,

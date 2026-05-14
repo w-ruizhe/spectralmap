@@ -1,7 +1,7 @@
 
 import numpy as np
 import pytest
-from spectralmap.bayesian_linalg import optimize_hyperparameters
+from spectralmap.bayesian_linalg import gaussian_linear_posterior, optimize_hyperparameters
 
 def test_optimize_hyperparameters_scalar_simple():
     """Test basic functionality with scalar alpha."""
@@ -54,3 +54,42 @@ def test_alpha_scalar_enforcement():
     
     with pytest.raises(TypeError):
         optimize_hyperparameters(A, y, alpha_guess=np.array([1.0, 2.0]))
+
+
+def test_gaussian_linear_posterior_matches_predictive_covariance():
+    rng = np.random.default_rng(4)
+    n_obs, n_coeff = 8, 3
+    A = rng.normal(size=(n_obs, n_coeff))
+    y = rng.normal(size=n_obs)
+    sigma = np.linspace(0.05, 0.2, n_obs)
+    prior_mean = np.array([1.0, 0.2, -0.1])
+    prior_cov = np.array(
+        [
+            [0.5, 0.1, 0.0],
+            [0.1, 0.4, 0.05],
+            [0.0, 0.05, 0.3],
+        ],
+        dtype=float,
+    )
+
+    result = gaussian_linear_posterior(
+        A,
+        y,
+        sigma_y=sigma,
+        prior_mean=prior_mean,
+        prior_covariance=prior_cov,
+    )
+
+    predictive_cov = np.diag(sigma**2) + A @ prior_cov @ A.T
+    resid = y - A @ prior_mean
+    sign, logdet = np.linalg.slogdet(predictive_cov)
+    assert sign > 0
+    dense_logp = -0.5 * (
+        resid @ np.linalg.solve(predictive_cov, resid)
+        + logdet
+        + n_obs * np.log(2.0 * np.pi)
+    )
+
+    assert result["posterior_mean"].shape == (n_coeff,)
+    assert result["posterior_cov"].shape == (n_coeff, n_coeff)
+    assert np.isclose(result["log_evidence"], dense_logp, rtol=0.0, atol=1e-8)

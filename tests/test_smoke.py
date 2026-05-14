@@ -389,6 +389,108 @@ def test_rotmaps_marginalize_over_lambda_axis():
 
 
 @pytest.mark.skipif(not _starry_available(), reason="starry is unavailable")
+def test_rotmaps_joint_wavelength_posterior_matches_independent_diagonal_depth_prior():
+    from spectralmap.bayesian_linalg import gaussian_linear_posterior
+    from spectralmap.core import LightCurveData
+    from spectralmap.rotational import RotMaps
+
+    class _FakeMap:
+        def __init__(self):
+            self.mask_2d = np.ones((1, 3), dtype=bool)
+            self.mask_1d = self.mask_2d.ravel()
+            self.lat = np.zeros((1, 3), dtype=float)
+            self.lon = np.array([[-60.0, 0.0, 60.0]], dtype=float)
+            self.lat_flat = self.lat.ravel()
+            self.lon_flat = self.lon.ravel()
+
+        def design_matrix(self, theta):
+            x = np.cos(np.deg2rad(theta))
+            return np.column_stack((np.ones_like(x), x))
+
+        def intensity_design_matrix(self, projection="rect"):
+            return np.array(
+                [
+                    [1.0, -1.0],
+                    [1.0, 0.0],
+                    [1.0, 1.0],
+                ],
+                dtype=float,
+            )
+
+    theta = np.array([0.0, 90.0, 180.0, 270.0])
+    x = np.cos(np.deg2rad(theta))
+    flux = np.vstack([1.0 + 0.25 * x, 1.0 - 0.15 * x])
+    flux_err = np.full_like(flux, 0.05)
+    data = LightCurveData(theta=theta, flux=flux, flux_err=flux_err, wl=np.array([1.0, 2.0]))
+
+    maps = RotMaps(map_res=3, verbose=False)
+    fake = _FakeMap()
+    maps._make_map = lambda ydeg, inc: fake
+
+    joint = maps.solve_joint_wavelength_posterior(
+        data,
+        inc=70.0,
+        ydeg=1,
+        spatial_length_scale=1.0,
+        depth_length_scale=None,
+        depth_jitter=0.0,
+    )
+
+    A_fit = fake.design_matrix(theta)[:, 1:]
+    for i_wl in range(2):
+        prior_cov = joint["joint_prior_cov"][i_wl:i_wl + 1, i_wl:i_wl + 1]
+        independent = gaussian_linear_posterior(
+            A_fit,
+            flux[i_wl] - 1.0,
+            sigma_y=flux_err[i_wl],
+            prior_covariance=prior_cov,
+        )
+        assert np.allclose(joint["coeff_mu"][i_wl, 1:], independent["posterior_mean"])
+        assert np.allclose(joint["coeff_cov"][i_wl, 1:, 1:], independent["posterior_cov"])
+
+
+@pytest.mark.skipif(not _starry_available(), reason="starry is unavailable")
+def test_rotmaps_joint_wavelength_posterior_couples_nearby_depths():
+    from spectralmap.core import LightCurveData
+    from spectralmap.rotational import RotMaps
+
+    class _FakeMap:
+        mask_2d = np.ones((1, 3), dtype=bool)
+        mask_1d = mask_2d.ravel()
+        lat = np.zeros((1, 3), dtype=float)
+        lon = np.array([[-60.0, 0.0, 60.0]], dtype=float)
+        lat_flat = lat.ravel()
+        lon_flat = lon.ravel()
+
+        def design_matrix(self, theta):
+            x = np.cos(np.deg2rad(theta))
+            return np.column_stack((np.ones_like(x), x))
+
+        def intensity_design_matrix(self, projection="rect"):
+            return np.array([[1.0, -1.0], [1.0, 0.0], [1.0, 1.0]], dtype=float)
+
+    theta = np.array([0.0, 90.0, 180.0, 270.0])
+    x = np.cos(np.deg2rad(theta))
+    flux = np.vstack([1.0 + 0.4 * x, np.ones_like(x)])
+    flux_err = np.vstack([np.full(theta.size, 0.04), np.full(theta.size, 10.0)])
+    data = LightCurveData(theta=theta, flux=flux, flux_err=flux_err, wl=np.array([1.0, 1.05]))
+
+    maps = RotMaps(map_res=3, verbose=False)
+    maps._make_map = lambda ydeg, inc: _FakeMap()
+    coupled = maps.solve_joint_wavelength_posterior(
+        data,
+        inc=70.0,
+        ydeg=1,
+        spatial_length_scale=1.0,
+        depth_length_scale=10.0,
+    )
+
+    assert coupled["depth_cov_prior"][0, 1] > 0.9 * coupled["depth_cov_prior"][0, 0]
+    assert abs(coupled["joint_free_coeff_cov"][0, 1]) > 0.0
+    assert abs(coupled["coeff_mu"][1, 1]) > 1e-4
+
+
+@pytest.mark.skipif(not _starry_available(), reason="starry is unavailable")
 def test_lightcurvedata_requires_at_least_one_phase_axis():
     from spectralmap.core import LightCurveData
 

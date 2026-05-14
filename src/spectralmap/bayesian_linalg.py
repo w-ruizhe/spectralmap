@@ -9,6 +9,172 @@ CONVERGENCE_TOL = 1e-6
 ALPHA_BOUNDS = (1e-20, 1e20)
 
 
+def _coerce_observation_noise(sigma_y, n_obs: int) -> np.ndarray:
+    """Return a finite positive 1D uncertainty vector."""
+    if sigma_y is None:
+        return np.ones(n_obs, dtype=float)
+
+    sigma = np.asarray(sigma_y, dtype=float)
+    if sigma.ndim == 0:
+        sigma = np.full(n_obs, float(sigma), dtype=float)
+    else:
+        sigma = sigma.reshape(-1)
+    if sigma.shape != (n_obs,):
+        raise ValueError(f"sigma_y must have length {n_obs}, got {sigma.size}.")
+    if np.any(~np.isfinite(sigma)) or np.any(sigma <= 0.0):
+        raise ValueError("sigma_y must be finite and strictly positive.")
+    return sigma
+
+
+def _coerce_dense_prior(
+    prior_mean,
+    prior_covariance,
+    prior_precision,
+    n_coeff: int,
+    *,
+    jitter: float = FLOOR,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Return prior mean, prior precision, and log determinant of covariance."""
+    if prior_covariance is not None and prior_precision is not None:
+        raise ValueError("Provide either prior_covariance or prior_precision, not both.")
+
+    if prior_mean is None:
+        mu0 = np.zeros(n_coeff, dtype=float)
+    else:
+        mu0 = np.asarray(prior_mean, dtype=float).reshape(-1)
+    if mu0.shape != (n_coeff,):
+        raise ValueError(f"prior_mean must have length {n_coeff}, got {mu0.size}.")
+
+    if prior_covariance is None and prior_precision is None:
+        precision = np.eye(n_coeff, dtype=float)
+        return mu0, precision, 0.0
+
+    if prior_covariance is not None:
+        cov = np.asarray(prior_covariance, dtype=float)
+        if cov.shape != (n_coeff, n_coeff):
+            raise ValueError(
+                f"prior_covariance must have shape ({n_coeff}, {n_coeff}), got {cov.shape}."
+            )
+        cov = 0.5 * (cov + cov.T)
+        if jitter > 0.0:
+            cov = cov + np.eye(n_coeff) * float(jitter)
+        sign, logdet_cov = np.linalg.slogdet(cov)
+        if sign <= 0:
+            raise ValueError("prior_covariance must be positive definite after jitter.")
+        precision = np.linalg.solve(cov, np.eye(n_coeff))
+        return mu0, 0.5 * (precision + precision.T), float(logdet_cov)
+
+    precision_arr = np.asarray(prior_precision, dtype=float)
+    if precision_arr.ndim == 0:
+        value = float(precision_arr)
+        if value <= 0.0 or not np.isfinite(value):
+            raise ValueError("prior_precision must be finite and strictly positive.")
+        precision = np.eye(n_coeff) * value
+        return mu0, precision, float(-n_coeff * np.log(value))
+
+    if precision_arr.ndim == 1:
+        precision_arr = precision_arr.reshape(-1)
+        if precision_arr.shape != (n_coeff,):
+            raise ValueError(
+                f"prior_precision vector must have length {n_coeff}, got {precision_arr.size}."
+            )
+        if np.any(~np.isfinite(precision_arr)) or np.any(precision_arr <= 0.0):
+            raise ValueError("prior_precision entries must be finite and strictly positive.")
+        precision = np.diag(precision_arr)
+        return mu0, precision, float(-np.sum(np.log(precision_arr)))
+
+    if precision_arr.shape != (n_coeff, n_coeff):
+        raise ValueError(
+            f"prior_precision must have shape ({n_coeff}, {n_coeff}), got {precision_arr.shape}."
+        )
+    precision = 0.5 * (precision_arr + precision_arr.T)
+    sign, logdet_precision = np.linalg.slogdet(precision)
+    if sign <= 0:
+        raise ValueError("prior_precision must be positive definite.")
+    return mu0, precision, float(-logdet_precision)
+
+
+def gaussian_linear_posterior(
+    A: np.ndarray,
+    y: np.ndarray,
+    *,
+    sigma_y=None,
+    prior_mean=None,
+    prior_covariance=None,
+    prior_precision=None,
+    jitter: float = FLOOR,
+) -> dict:
+    """Analytic posterior and evidence for a dense Gaussian linear model.
+
+    The model is ``y ~ N(A @ coeffs, diag(sigma_y**2))`` and
+    ``coeffs ~ N(prior_mean, prior_covariance)``. Callers may pass an
+    equivalent prior precision matrix instead of a covariance.
+    """
+    A = np.asarray(A, dtype=float)
+    if A.ndim != 2:
+        raise ValueError("A must be a 2D design matrix.")
+    y = np.asarray(y, dtype=float).reshape(-1)
+    n_obs, n_coeff = A.shape
+    if y.shape != (n_obs,):
+        raise ValueError(f"y must have length {n_obs}, got {y.size}.")
+    if not np.all(np.isfinite(A)):
+        raise ValueError("A must contain only finite values.")
+
+    sigma = _coerce_observation_noise(sigma_y, n_obs)
+    finite = np.isfinite(y) & np.isfinite(sigma) & np.all(np.isfinite(A), axis=1)
+    if not np.all(finite):
+        A = A[finite]
+        y = y[finite]
+        sigma = sigma[finite]
+        n_obs = y.size
+
+    mu0, prior_prec, logdet_prior_cov = _coerce_dense_prior(
+        prior_mean,
+        prior_covariance,
+        prior_precision,
+        n_coeff,
+        jitter=float(jitter),
+    )
+    whitened_A = A / sigma[:, np.newaxis]
+    r0 = y - A @ mu0
+    whitened_r0 = r0 / sigma
+    posterior_precision = prior_prec + whitened_A.T @ whitened_A
+    posterior_precision = 0.5 * (posterior_precision + posterior_precision.T)
+    rhs = whitened_A.T @ whitened_r0
+
+    try:
+        chol = np.linalg.cholesky(posterior_precision + np.eye(n_coeff) * float(jitter))
+        posterior_cov = np.linalg.solve(chol.T, np.linalg.solve(chol, np.eye(n_coeff)))
+        posterior_delta = np.linalg.solve(chol.T, np.linalg.solve(chol, rhs))
+        logdet_posterior_precision = 2.0 * np.sum(np.log(np.diag(chol)))
+    except np.linalg.LinAlgError:
+        posterior_cov = np.linalg.pinv(posterior_precision)
+        posterior_delta = posterior_cov @ rhs
+        sign, logdet_posterior_precision = np.linalg.slogdet(posterior_precision)
+        if sign <= 0:
+            raise ValueError("posterior precision is not positive definite.")
+
+    posterior_cov = 0.5 * (posterior_cov + posterior_cov.T)
+    posterior_mean = mu0 + posterior_delta
+    quad = float(whitened_r0 @ whitened_r0 - rhs @ posterior_delta)
+    logdet_noise = float(np.sum(np.log(sigma**2)))
+    logdet_predictive = logdet_noise + logdet_prior_cov + float(logdet_posterior_precision)
+    log_evidence = -0.5 * (quad + logdet_predictive + n_obs * np.log(2.0 * np.pi))
+
+    return {
+        "posterior_mean": posterior_mean,
+        "posterior_cov": posterior_cov,
+        "posterior_precision": posterior_precision,
+        "model_posterior_mean": A @ posterior_mean,
+        "model_prior_mean": A @ mu0,
+        "log_evidence": float(log_evidence),
+        "quad": quad,
+        "logdet_predictive": float(logdet_predictive),
+        "n_obs": int(n_obs),
+        "n_coeff": int(n_coeff),
+    }
+
+
 def _alpha_to_vec(alpha_in, k: int):
     """Expand scalar or grouped alpha precision into a coefficient vector."""
     if np.isscalar(alpha_in):

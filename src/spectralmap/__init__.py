@@ -37,6 +37,7 @@ warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
 
 from . import bayesian_linalg
 from . import core
+from . import gp
 
 # Optional convenience imports: keep top-level package import resilient when
 # optional plotting/ML dependencies are not installed.
@@ -50,5 +51,5 @@ try:
 except ModuleNotFoundError:
     plotting = None
 
-__all__ = ["__version__", "bayesian_linalg", "core", "cluster", "plotting"]
+__all__ = ["__version__", "bayesian_linalg", "core", "gp", "cluster", "plotting"]
 __version__ = _version("spectralmap")
